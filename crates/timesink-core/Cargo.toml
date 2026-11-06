@@ -1,0 +1,9 @@
+[package]
+name = "timesink-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared data model, privacy rules, tracker and storage for timesink"
+
+[dependencies]
+# anyhow: simple error handling with context messages.
+anyhow = "1"

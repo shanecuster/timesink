@@ -1,0 +1,14 @@
+# Workspace root for timesink.
+#
+# The project is split into crates so the pieces can be reused later:
+#   - timesink-core:   data model, title parsing, privacy rules, tracker, SQLite storage.
+#                      No Hyprland or UI code, so the TUI and sync can share it.
+#   - timesink-daemon: the background collector that talks to Hyprland.
+[workspace]
+resolver = "2"
+members = ["crates/timesink-core"]
+
+# Settings shared by every crate in the workspace.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
