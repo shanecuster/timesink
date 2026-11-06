@@ -7,3 +7,4 @@ description = "Shared data model, privacy rules, tracker and storage for timesin
 [dependencies]
 # anyhow: simple error handling with context messages.
 anyhow = "1"
+rusqlite = { version = "0.41.1", features = ["bundled"] }

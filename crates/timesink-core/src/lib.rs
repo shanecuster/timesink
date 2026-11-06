@@ -6,6 +6,8 @@
 //!                        ->  `tracker` (turns snapshots into time intervals)
 //!                        ->  `db` (stores the intervals in SQLite)
 
+pub mod db;
 pub mod model;
 pub mod sanitize;
 pub mod title;
+pub mod tracker;
