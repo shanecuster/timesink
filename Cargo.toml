@@ -6,7 +6,7 @@
 #   - timesink-daemon: the background collector that talks to Hyprland.
 [workspace]
 resolver = "2"
-members = ["crates/timesink-core"]
+members = ["crates/timesink-core", "crates/timesink-daemon"]
 
 # Settings shared by every crate in the workspace.
 [workspace.package]

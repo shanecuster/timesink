@@ -1,0 +1,13 @@
+[package]
+name = "timesink-daemon"
+version.workspace = true
+edition.workspace = true
+description = "Background collector: watches Hyprland focus and records time per window"
+
+[dependencies]
+# Shared model, privacy rules, tracker and storage.
+timesink-core = { path = "../timesink-core" }
+# anyhow: simple error handling with context messages.
+anyhow = "1"
+# serde_json: reads the JSON that Hyprland returns for the active window.
+serde_json = "1"
