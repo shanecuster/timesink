@@ -89,8 +89,9 @@ const SSH_OPTIONS_WITH_VALUE: &[&str] = &[
 /// Returns `None` if the command is not `ssh` or no host can be found.
 pub fn ssh_target(command: &str) -> Option<String> {
     let mut words = command.split_whitespace();
-    // The command must start with the ssh program.
-    if words.next()? != "ssh" {
+    // The command must start with the ssh program (a full path like /usr/bin/ssh is fine).
+    let program = words.next()?;
+    if program.rsplit('/').next() != Some("ssh") {
         return None;
     }
     while let Some(word) = words.next() {

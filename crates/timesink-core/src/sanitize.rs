@@ -99,10 +99,13 @@ impl Sanitizer {
     /// Reduce a terminal title to `ssh: <label>` or `<program> @ <directory>`.
     fn clean_terminal_title(&self, raw_title: &str) -> String {
         let parsed = parse_terminal_title(raw_title);
+        // The title shows the program as typed (`./target/release/foo`, `/usr/bin/ssh`);
+        // keep only the file name so paths never end up in the database.
+        let process = parsed.process.as_deref().map(program_name);
 
         // SSH sessions get a label instead of the real target.
         if let Some(command) = parsed.command.as_deref() {
-            if parsed.process.as_deref() == Some("ssh") {
+            if process == Some("ssh") {
                 let label = ssh_target(command)
                     .and_then(|host| self.host_labels.get(&host).cloned())
                     .unwrap_or_else(|| "other".to_string());
@@ -111,13 +114,18 @@ impl Sanitizer {
         }
 
         // Anything else: program name and directory only, never the command line.
-        match (parsed.process, parsed.cwd) {
+        match (process, parsed.cwd) {
             (Some(process), Some(cwd)) => format!("{process} @ {cwd}"),
-            (Some(process), None) => process,
+            (Some(process), None) => process.to_string(),
             // Unrecognised title format: store nothing rather than guess.
             (None, _) => "terminal".to_string(),
         }
     }
+}
+
+/// The file name part of a program path: `./target/release/foo` becomes `foo`.
+fn program_name(process: &str) -> &str {
+    process.rsplit('/').next().unwrap_or(process)
 }
 
 #[cfg(test)]
@@ -125,6 +133,23 @@ mod tests {
     use super::*;
 
     const WEZTERM: &str = "org.wezfurlong.wezterm";
+
+    #[test]
+    fn program_paths_are_reduced_to_the_file_name() {
+        let s = sanitizer();
+        assert_eq!(
+            s.clean_title(
+                WEZTERM,
+                "~/Projects/timesink: ./target/release/timesink-daemon - ./target/release/timesink-daemon"
+            ),
+            "timesink-daemon @ ~/Projects/timesink"
+        );
+        // A full path to ssh is still recognised as an ssh session.
+        assert_eq!(
+            s.clean_title(WEZTERM, "~: /usr/bin/ssh admin@192.0.2.10 - /usr/bin/ssh"),
+            "ssh: proxmox"
+        );
+    }
 
     /// A sanitizer that knows one example host (TEST-NET address, not a real machine).
     fn sanitizer() -> Sanitizer {
