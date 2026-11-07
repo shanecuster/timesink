@@ -118,6 +118,24 @@ impl AppMap {
         }
     }
 
+    /// Every category named in the config, sorted and without duplicates.
+    /// "Other" is not included; it exists only for apps that are not listed.
+    ///
+    /// Useful for giving each category a fixed colour that does not change
+    /// between screens.
+    pub fn categories(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .exact
+            .values()
+            .map(|e| e.category.clone())
+            .chain(self.prefixes.iter().map(|(_, e)| e.category.clone()))
+            .filter(|c| c != OTHER)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Turn a parsed entry into the public answer.
     fn info(entry: &Entry) -> AppInfo {
         AppInfo {
@@ -287,5 +305,14 @@ mod tests {
                 ("Other".to_string(), 7),
             ]
         );
+    }
+
+    #[test]
+    fn categories_are_sorted_and_unique() {
+        assert_eq!(
+            sample().categories(),
+            vec!["Browser", "Chat", "Deep Work", "Files", "Terminal"]
+        );
+        assert!(AppMap::default().categories().is_empty());
     }
 }
