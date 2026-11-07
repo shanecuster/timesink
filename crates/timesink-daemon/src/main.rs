@@ -11,6 +11,8 @@
 
 mod hyprland;
 mod idle;
+mod logind;
+mod media;
 mod paths;
 mod service;
 

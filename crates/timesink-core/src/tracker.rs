@@ -57,6 +57,14 @@ impl Tracker {
         self.away
     }
 
+    /// Time of the most recent sample (0 before the first one).
+    ///
+    /// Used to place a late "going to sleep" notice at the last moment we know
+    /// the machine was awake, instead of after it woke up.
+    pub fn last_seen(&self) -> i64 {
+        self.last_seen
+    }
+
     /// Feed one sample: the time and what is focused (`None` when no window is).
     ///
     /// Call this on every focus-related event AND on a regular heartbeat, so

@@ -18,10 +18,10 @@ use timesink_core::db::{Db, Recorder};
 use timesink_core::model::WindowSnapshot;
 use timesink_core::presence::{Presence, PresenceState};
 use timesink_core::sanitize::Sanitizer;
-use timesink_core::tracker::{Effect, Tracker};
+use timesink_core::tracker::{Effect, Tracker, MAX_GAP_SECS};
 
 use crate::hyprland::{is_relevant_event, Hypr, Next};
-use crate::{idle, paths};
+use crate::{idle, logind, media, paths};
 
 /// How often the open interval is refreshed when no events arrive.
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -39,6 +39,16 @@ pub enum Msg {
     Idle { since: i64 },
     /// Input is happening (also sent when idle detection first connects).
     Active,
+    /// The system is about to suspend.
+    Sleep,
+    /// The system woke up.
+    Wake,
+    /// The session was locked.
+    Lock,
+    /// The session was unlocked.
+    Unlock,
+    /// Whether any media player is playing changed.
+    Media(bool),
 }
 
 /// Current time in whole seconds since the Unix epoch.
@@ -91,6 +101,45 @@ impl Service {
                 self.presence.idle_ended();
                 self.refresh_presence(now);
                 // Back at the keyboard: start timing the focused window again.
+                self.sample(now);
+            }
+            Msg::Sleep => {
+                // If this notice was only delivered after the machine woke up
+                // (the daemon was frozen), "now" is too late: the sleep began
+                // when we last saw it awake.
+                let last_seen = self.tracker.last_seen();
+                let since = if now - last_seen > MAX_GAP_SECS {
+                    last_seen
+                } else {
+                    now
+                };
+                self.presence.sleep_started(since);
+                self.refresh_presence(now);
+            }
+            Msg::Wake => {
+                self.presence.sleep_ended();
+                self.refresh_presence(now);
+                self.sample(now);
+            }
+            Msg::Lock => {
+                self.presence.lock_started(now);
+                self.refresh_presence(now);
+            }
+            Msg::Unlock => {
+                self.presence.lock_ended();
+                self.refresh_presence(now);
+                self.sample(now);
+            }
+            Msg::Media(playing) => {
+                if self.verbose {
+                    eprintln!(
+                        "timesink: media {}",
+                        if playing { "playing" } else { "stopped" }
+                    );
+                }
+                self.presence.media_changed(now, playing);
+                self.refresh_presence(now);
+                // Media can end an idle period, so there may be a window to time.
                 self.sample(now);
             }
         }
@@ -248,6 +297,8 @@ pub fn run(verbose: bool) -> Result<()> {
         config.idle_timeout_secs / 60
     );
     idle::spawn(tx.clone(), config.idle_timeout_secs);
+    logind::spawn(tx.clone());
+    media::spawn(tx.clone());
 
     loop {
         match rx.recv_timeout(HEARTBEAT) {
