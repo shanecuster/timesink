@@ -98,6 +98,9 @@ fn now_ts() -> i64 {
 /// The normal mode: the browser started us. Read reports until it closes the pipe.
 fn run_host() -> Result<()> {
     let db = Db::open(&paths::db_path()?, &paths::device_id())?;
+    // Each running browser starts its own helper; the process id keeps their stretches apart
+    // so one browser going quiet never ends the other's.
+    let source = std::process::id().to_string();
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
@@ -108,7 +111,7 @@ fn run_host() -> Result<()> {
         let result = parse_report(&body).and_then(|report| {
             // Re-read the config every time so edits to domains.conf apply without a restart.
             let config = paths::load_domain_config()?;
-            db.record_domain(now_ts(), site_for(&report, &config).as_deref())
+            db.record_domain(now_ts(), site_for(&report, &config).as_deref(), &source)
         });
         if let Err(e) = &result {
             eprintln!("timesink-zen-host: {e:#}");
@@ -173,12 +176,66 @@ fn uninstall() -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+/// Describe one manifest file: missing, wrong target, or fine.
+fn manifest_state(file: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return "missing (run: timesink-zen-host install)".into();
+    };
+    let target = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v["path"].as_str().map(PathBuf::from));
+    match target {
+        None => "unreadable (run: timesink-zen-host install)".into(),
+        Some(p) if !p.exists() => format!(
+            "points at {} which no longer exists (run: timesink-zen-host install)",
+            p.display()
+        ),
+        Some(p) => format!("ok -> {}", p.display()),
+    }
+}
+
+/// Human wording for "how long ago".
+fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 90 => format!("{s}s ago"),
+        s if s < 5400 => format!("{} min ago", s / 60),
+        s if s < 172_800 => format!("{} h ago", s / 3600),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
+/// `status`: everything worth checking when site time seems not to be recording.
+fn status() -> Result<()> {
+    println!("manifests:");
+    for dir in manifest_dirs()? {
+        let file = dir.join(format!("{HOST_NAME}.json"));
+        println!("  {}: {}", file.display(), manifest_state(&file));
+    }
+    let config = paths::load_domain_config()?;
+    println!("browsers counted: {}", config.browsers.join(", "));
+    let db = Db::open(&paths::db_path()?, &paths::device_id())?;
+    match db.latest_domain_report()? {
+        Some((site, end)) => println!(
+            "last report: {site}, {} (a quiet stretch is normal if you were not browsing)",
+            ago((now_ts() - end).max(0))
+        ),
+        None => println!("last report: none yet"),
+    }
+    println!(
+        "If reports stopped: check the extension is enabled at about:addons, that it is the \
+         signed build (temporary add-ons vanish on restart), and run `install` again after \
+         moving or reinstalling this program."
+    );
+    Ok(())
+}
+
 /// Text shown by `help`.
 const USAGE: &str = "\
 timesink-zen-host: receives website reports from the timesink browser extension.
 
   install              register with Zen and Firefox (run once, after installing)
   uninstall            remove that registration
+  status               check the registration and whether reports are arriving
   forget --all         delete all stored website time
   forget <site>        delete one site's time, e.g. forget github.com
   help                 this text
@@ -210,6 +267,7 @@ fn start() -> Result<()> {
             }
             Ok(())
         }
+        Some("status") => status(),
         Some("forget") => {
             let db = Db::open(&paths::db_path()?, &paths::device_id())?;
             let n = match args.get(1).map(String::as_str) {
@@ -306,6 +364,22 @@ mod tests {
         assert_eq!(site("login.bank.example"), None);
         assert_eq!(site("localhost"), None);
         assert_eq!(site_for(&Report { host: None }, &config), None);
+    }
+
+    #[test]
+    fn manifest_state_spots_missing_and_stale_targets() {
+        let dir = std::env::temp_dir().join(format!("timesink-ms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(manifest_state(&dir.join("nope.json")).starts_with("missing"));
+        let f = dir.join("m.json");
+        std::fs::write(&f, manifest_json(Path::new("/no/such/exe"))).unwrap();
+        assert!(manifest_state(&f).contains("no longer exists"));
+        std::fs::write(&f, manifest_json(&std::env::current_exe().unwrap())).unwrap();
+        assert!(manifest_state(&f).starts_with("ok"));
+        assert_eq!(ago(30), "30s ago");
+        assert_eq!(ago(600), "10 min ago");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

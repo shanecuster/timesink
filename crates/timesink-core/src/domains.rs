@@ -22,7 +22,7 @@ pub const DOMAIN_GAP_SECS: i64 = 90;
 
 /// The browser window classes whose focus time site time is measured against, if the config
 /// does not say otherwise.
-pub const DEFAULT_BROWSER: &str = "zen";
+pub const DEFAULT_BROWSERS: &[&str] = &["zen", "firefox"];
 
 /// Second-level suffixes that take three labels to make a registered site
 /// (`bbc.co.uk`, not `co.uk`). This is a short built-in list, not the full public-suffix
@@ -93,7 +93,7 @@ pub struct DomainConfig {
 impl Default for DomainConfig {
     fn default() -> Self {
         DomainConfig {
-            browsers: vec![DEFAULT_BROWSER.to_string()],
+            browsers: DEFAULT_BROWSERS.iter().map(|b| b.to_string()).collect(),
             blocked: Vec::new(),
             sites: AppMap::default(),
         }

@@ -15,7 +15,7 @@ use crate::tracker::Effect;
 
 /// Version of the database layout. Bump it and add a migration step when the
 /// layout changes. Stored in SQLite's built-in `user_version` field.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Intervals shorter than this many seconds are deleted when they close.
 /// This drops the flicker from quickly passing over windows.
@@ -120,6 +120,12 @@ impl Db {
                  );
                  CREATE INDEX IF NOT EXISTS idx_domains_start ON domains(start_ts);",
             )?;
+        }
+        if version < 4 {
+            // Version 4 records which helper process (one per running browser) wrote a
+            // stretch, so two browsers with the extension cannot close each other's stretches.
+            // Existing rows get '' (unknown source).
+            conn.execute_batch("ALTER TABLE domains ADD COLUMN source TEXT NOT NULL DEFAULT '';")?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
@@ -366,15 +372,15 @@ impl Db {
     ///
     /// The report either extends the open stretch (same site, reported within
     /// [`crate::domains::DOMAIN_GAP_SECS`]), starts a new one, or closes the open one.
-    pub fn record_domain(&self, now: i64, site: Option<&str>) -> Result<()> {
+    pub fn record_domain(&self, now: i64, site: Option<&str>, source: &str) -> Result<()> {
         use crate::domains::DOMAIN_GAP_SECS;
-        // The newest stretch of this computer, if any.
+        // The newest stretch from this source (one browser's helper) on this computer.
         let last: Option<(i64, i64, String, bool)> = self
             .conn
             .query_row(
                 "SELECT id, end_ts, domain, closed FROM domains
-                 WHERE device_id = ?1 ORDER BY id DESC LIMIT 1",
-                [&self.device_id],
+                 WHERE device_id = ?1 AND source = ?2 ORDER BY id DESC LIMIT 1",
+                params![self.device_id, source],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
             )
             .ok();
@@ -399,9 +405,9 @@ impl Db {
                     )?;
                 }
                 self.conn.execute(
-                    "INSERT INTO domains (device_id, start_ts, end_ts, domain, closed)
-                     VALUES (?1, ?2, ?2, ?3, 0)",
-                    params![self.device_id, now, d],
+                    "INSERT INTO domains (device_id, start_ts, end_ts, domain, closed, source)
+                     VALUES (?1, ?2, ?2, ?3, 0, ?4)",
+                    params![self.device_id, now, d, source],
                 )?;
             }
             // Nothing trackable in front: end the open stretch now.
@@ -439,6 +445,19 @@ impl Db {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("reading site rows")
+    }
+
+    /// The newest site report stored for this computer as (site, last report time), if any.
+    /// Used by the helper's `status` command to show whether the extension is still reporting.
+    pub fn latest_domain_report(&self) -> Result<Option<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT domain, end_ts FROM domains WHERE device_id = ?1 ORDER BY end_ts DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([&self.device_id])?;
+        match rows.next()? {
+            Some(r) => Ok(Some((r.get(0)?, r.get(1)?))),
+            None => Ok(None),
+        }
     }
 
     /// Delete stored site time: all of it, or just one site. Returns how many rows went.
@@ -1117,14 +1136,14 @@ mod listening_tests {
     #[test]
     fn site_reports_extend_start_and_close_stretches() {
         let db = Db::open_in_memory("test").unwrap();
-        db.record_domain(100, Some("github.com")).unwrap();
-        db.record_domain(130, Some("github.com")).unwrap();
-        db.record_domain(160, Some("github.com")).unwrap();
+        db.record_domain(100, Some("github.com"), "a").unwrap();
+        db.record_domain(130, Some("github.com"), "a").unwrap();
+        db.record_domain(160, Some("github.com"), "a").unwrap();
         // Switching sites closes the first stretch at the switch time.
-        db.record_domain(190, Some("wikipedia.org")).unwrap();
-        db.record_domain(220, None).unwrap();
+        db.record_domain(190, Some("wikipedia.org"), "a").unwrap();
+        db.record_domain(220, None, "a").unwrap();
         // The same site again after a "none" starts a fresh stretch, not a bridge.
-        db.record_domain(250, Some("wikipedia.org")).unwrap();
+        db.record_domain(250, Some("wikipedia.org"), "a").unwrap();
         let rows = db.domains_between(0, 1000).unwrap();
         assert_eq!(
             rows,
@@ -1139,10 +1158,10 @@ mod listening_tests {
     #[test]
     fn a_long_silence_does_not_invent_time() {
         let db = Db::open_in_memory("test").unwrap();
-        db.record_domain(100, Some("github.com")).unwrap();
-        db.record_domain(130, Some("github.com")).unwrap();
+        db.record_domain(100, Some("github.com"), "a").unwrap();
+        db.record_domain(130, Some("github.com"), "a").unwrap();
         // The extension went quiet (browser closed, machine asleep) for 10 minutes.
-        db.record_domain(730, Some("github.com")).unwrap();
+        db.record_domain(730, Some("github.com"), "a").unwrap();
         let rows = db.domains_between(0, 2000).unwrap();
         assert_eq!(rows[0], ("github.com".to_string(), 100, 130));
         assert_eq!(rows[1].1, 730);
@@ -1151,11 +1170,70 @@ mod listening_tests {
     #[test]
     fn forgetting_one_site_or_all() {
         let db = Db::open_in_memory("test").unwrap();
-        db.record_domain(10, Some("a.com")).unwrap();
-        db.record_domain(50, Some("b.com")).unwrap();
+        db.record_domain(10, Some("a.com"), "a").unwrap();
+        db.record_domain(50, Some("b.com"), "a").unwrap();
         assert_eq!(db.forget_domains(Some("a.com")).unwrap(), 1);
         assert_eq!(db.domains_between(0, 100).unwrap().len(), 1);
         assert_eq!(db.forget_domains(None).unwrap(), 1);
         assert!(db.domains_between(0, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_browsers_do_not_close_each_others_stretches() {
+        let db = Db::open_in_memory("box").unwrap();
+        // Browser A shows github; browser B (another helper) reports "nothing" while unfocused.
+        db.record_domain(100, Some("github.com"), "a").unwrap();
+        db.record_domain(110, None, "b").unwrap();
+        db.record_domain(130, Some("github.com"), "a").unwrap();
+        db.record_domain(140, None, "b").unwrap();
+        db.record_domain(160, Some("github.com"), "a").unwrap();
+        // One unbroken stretch from A.
+        assert_eq!(
+            db.domains_between(0, 1000).unwrap(),
+            vec![("github.com".to_string(), 100, 160)]
+        );
+        // B then takes over while A goes quiet.
+        db.record_domain(170, None, "a").unwrap();
+        db.record_domain(170, Some("wikipedia.org"), "b").unwrap();
+        let rows = db.domains_between(0, 1000).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].0, "wikipedia.org");
+        assert_eq!(
+            db.latest_domain_report().unwrap().unwrap().0,
+            "wikipedia.org"
+        );
+    }
+
+    #[test]
+    fn a_v3_database_gains_the_source_column_with_a_backup() {
+        let dir = std::env::temp_dir().join(format!("timesink-v3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE intervals (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
+                     app_class TEXT NOT NULL, title TEXT NOT NULL, workspace TEXT NOT NULL);
+                 CREATE TABLE listening (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, player TEXT NOT NULL);
+                 CREATE TABLE domains (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, domain TEXT NOT NULL,
+                     closed INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO domains VALUES (1,'box',100,160,'github.com',1);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+        let db = Db::open(&path, "box").unwrap();
+        assert!(dir.join("t.db.bak-v3").exists());
+        assert_eq!(
+            db.domains_between(0, 1000).unwrap(),
+            vec![("github.com".to_string(), 100, 160)]
+        );
+        db.record_domain(500, Some("a.com"), "x").unwrap();
+        assert_eq!(db.domains_between(0, 1000).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

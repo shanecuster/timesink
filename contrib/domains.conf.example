@@ -1,13 +1,13 @@
 # timesink domains.conf: website names and categories for the optional browser extension.
 # Copy to ~/.config/timesink/domains.conf and edit.
 #
-#   browser = zen              window class(es) of your browser (comma separated)
+#   browser = zen, firefox     window class(es) of your browser(s) (comma separated; this is the default)
 #   block = bank.example       a site that is NEVER recorded (subdomains too)
 #   site  display  category    same layout as apps.conf; the site is the main domain
 #
 # Only the main site is ever stored: gist.github.com is recorded as github.com.
 
-browser = zen
+browser = zen, firefox
 
 github.com        github      Research
 wikipedia.org     wikipedia   Research
