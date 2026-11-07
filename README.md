@@ -107,3 +107,25 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## Friendly names and categories
+
+The database stores each application's raw window class, for example
+`org.wezfurlong.wezterm`. To show short names and group time into
+categories, copy `contrib/apps.conf.example` to
+`~/.config/timesink/apps.conf` and edit it:
+
+```
+org.wezfurlong.wezterm   wezterm   Terminal
+io.github.lgse.Strata*   strata    Files
+```
+
+- Fields are: raw class, display name, category (the category may contain spaces).
+- A raw class ending in `*` matches everything that starts with it.
+- Matching ignores upper/lower case.
+- Apps that are not listed keep their raw name and appear under "Other".
+
+Names are applied only when shown, so you can change the file at any time and
+all of your history is re-sorted. `timesink-daemon apps` lists every app seen
+so far and marks the ones still missing from the file; `timesink-daemon report`
+shows totals by category and by application.

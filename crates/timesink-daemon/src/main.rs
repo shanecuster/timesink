@@ -38,7 +38,8 @@ fn main() -> Result<()> {
         None | Some("run") => service::run(verbose),
         Some("report") => report(),
         Some("scrub") => scrub(),
-        Some(other) => anyhow::bail!("unknown command '{other}' (try: run, report, scrub)"),
+        Some("apps") => apps(),
+        Some(other) => anyhow::bail!("unknown command '{other}' (try: run, report, scrub, apps)"),
     }
 }
 
@@ -74,16 +75,71 @@ fn scrub() -> Result<()> {
     Ok(())
 }
 
+/// List every application ever recorded with its display name and category.
+///
+/// Apps missing from `apps.conf` are marked, so the output shows exactly
+/// what still needs a line in the file.
+fn apps() -> Result<()> {
+    let path = paths::db_path()?;
+    let db = Db::open(&path, &paths::device_id())?;
+    let map = paths::load_app_map()?;
+
+    // All-time totals per raw class, biggest first.
+    let totals = db.totals_since(0)?;
+    println!("Applications seen (all time):\n");
+    println!(
+        "  {:>9}  {:<36} {:<12} category",
+        "time", "raw class", "name"
+    );
+    let mut unmapped = 0;
+    for (raw, secs) in &totals {
+        let info = map.lookup(raw);
+        let note = if info.mapped {
+            ""
+        } else {
+            unmapped += 1;
+            "   <- not in apps.conf"
+        };
+        println!(
+            "  {:>9}  {:<36} {:<12} {}{}",
+            format_duration(*secs),
+            raw,
+            info.display,
+            info.category,
+            note
+        );
+    }
+    println!(
+        "\nEdit {} to add names and categories ({unmapped} app(s) still unmapped).",
+        paths::config_dir()?.join("apps.conf").display()
+    );
+    Ok(())
+}
+
 /// Print a quick summary so you can check what was recorded.
 fn report() -> Result<()> {
     let path = paths::db_path()?;
     let db = Db::open(&path, &paths::device_id())?;
+    let map = paths::load_app_map()?;
     let now = service::now_ts();
 
     println!("Database: {}", path.display());
+    let totals = db.totals_since(now - 24 * 3600)?;
+    let (apps, categories) = map.group(&totals);
+
+    println!("\nLast 24 hours, by category:");
+    for (category, secs) in &categories {
+        println!("  {:>9}  {}", format_duration(*secs), category);
+    }
+
     println!("\nLast 24 hours, by application:");
-    for (app, secs) in db.totals_since(now - 24 * 3600)? {
-        println!("  {:>9}  {}", format_duration(secs), app);
+    for app in &apps {
+        println!(
+            "  {:>9}  {:<14} {}",
+            format_duration(app.secs),
+            app.display,
+            app.category
+        );
     }
 
     println!("\nMost recent intervals:");

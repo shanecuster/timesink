@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use timesink_core::appmap::AppMap;
 use timesink_core::config::Config;
 use timesink_core::sanitize::Sanitizer;
 
@@ -73,5 +74,13 @@ pub fn load_sanitizer(config: &Config) -> Result<Sanitizer> {
 pub fn load_config() -> Result<Config> {
     Ok(read_config_file("config.conf")?
         .map(|text| Config::from_conf(&text))
+        .unwrap_or_default())
+}
+
+/// Load `apps.conf` (friendly names and categories). Without the file every
+/// app keeps its raw name and is listed under "Other".
+pub fn load_app_map() -> Result<AppMap> {
+    Ok(read_config_file("apps.conf")?
+        .map(|text| AppMap::from_conf(&text))
         .unwrap_or_default())
 }

@@ -1,0 +1,23 @@
+# timesink apps.conf: friendly names and categories.
+# Copy to ~/.config/timesink/apps.conf and edit.
+#
+#   raw class (what the desktop reports)   display name   category
+#
+# - Run `timesink-daemon apps` to list every app seen so far; lines
+#   marked "not in apps.conf" still need an entry.
+# - A raw class ending in * matches everything that starts with it.
+# - Matching ignores upper/lower case. The category may contain spaces.
+# - Names are applied only when shown; the database keeps the raw class,
+#   so editing this file re-sorts your whole history.
+
+org.wezfurlong.wezterm      wezterm      Terminal
+zen                         zen          Browser
+eu.betterbird.Betterbird    betterbird   Email
+md.obsidian.Obsidian        obsidian     Notes
+discord                     discord      Chat
+hexchat                     hexchat      Chat
+cider                       cider        Music
+io.github.lgse.Strata*      strata       Files
+org.gnome.Nautilus          nautilus     Files
+jetbrains-studio            android-studio  Development
+bitwarden                   bitwarden    Passwords

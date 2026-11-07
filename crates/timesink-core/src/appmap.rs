@@ -128,6 +128,49 @@ impl AppMap {
     }
 }
 
+/// Time spent in one application after names have been applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppTotal {
+    /// Short display name.
+    pub display: String,
+    /// Category of the app.
+    pub category: String,
+    /// Seconds spent.
+    pub secs: i64,
+}
+
+impl AppMap {
+    /// Combine per-raw-class totals into per-display-name totals and
+    /// per-category totals, both sorted from most to least time.
+    ///
+    /// Several raw classes can share one display name (for example an app and
+    /// its file chooser); they are added together. If two classes share a
+    /// display name but have different categories, the first one seen keeps it.
+    pub fn group(&self, totals: &[(String, i64)]) -> (Vec<AppTotal>, Vec<(String, i64)>) {
+        let mut apps: Vec<AppTotal> = Vec::new();
+        let mut categories: Vec<(String, i64)> = Vec::new();
+        for (raw, secs) in totals {
+            let info = self.lookup(raw);
+            match apps.iter_mut().find(|a| a.display == info.display) {
+                Some(app) => app.secs += secs,
+                None => apps.push(AppTotal {
+                    display: info.display,
+                    category: info.category.clone(),
+                    secs: *secs,
+                }),
+            }
+            match categories.iter_mut().find(|(c, _)| *c == info.category) {
+                Some((_, total)) => *total += secs,
+                None => categories.push((info.category, *secs)),
+            }
+        }
+        // Biggest first; ties broken by name so the order is stable.
+        apps.sort_by(|a, b| b.secs.cmp(&a.secs).then(a.display.cmp(&b.display)));
+        categories.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        (apps, categories)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +262,30 @@ mod tests {
         let info = AppMap::default().lookup("zen");
         assert!(!info.mapped);
         assert_eq!(info.display, "zen");
+    }
+
+    #[test]
+    fn group_merges_shared_names_and_sorts() {
+        let map = sample();
+        let totals = vec![
+            ("zen".to_string(), 100),
+            ("io.github.lgse.Strata".to_string(), 30),
+            ("io.github.lgse.Strata.FileChooser".to_string(), 5),
+            ("org.wezfurlong.wezterm".to_string(), 50),
+            ("mystery".to_string(), 7),
+        ];
+        let (apps, cats) = map.group(&totals);
+        assert_eq!(apps[0].display, "zen");
+        let strata = apps.iter().find(|a| a.display == "strata").unwrap();
+        assert_eq!(strata.secs, 35);
+        assert_eq!(
+            cats,
+            vec![
+                ("Browser".to_string(), 100),
+                ("Terminal".to_string(), 50),
+                ("Files".to_string(), 35),
+                ("Other".to_string(), 7),
+            ]
+        );
     }
 }
