@@ -4,9 +4,10 @@
 //! ("the muted colour", "the warning colour") and the current theme decides the real RGB value,
 //! so switching themes is only a matter of swapping which [`Theme`] is current.
 //!
-//! The category colours in the charts are NOT part of a theme on purpose: they are a fixed
-//! set (see the TUI's `palette.rs`) so "Browser" is the same colour in every theme and no two
-//! categories can end up looking alike.
+//! Each theme also carries its own list of accent colours for the chart bars (see
+//! [`Theme::category_color`]), so the bars match the rest of the screen. Within one theme a
+//! category always keeps the same colour; a test checks that no two of the first twelve look
+//! alike, so neighbouring bars can always be told apart.
 //!
 //! The palettes live in `core` (plain RGB bytes, no terminal types) so a future Android app
 //! can use exactly the same colours. The names and values match tuxwire and zerohour.
@@ -72,6 +73,10 @@ pub struct Theme {
     pub warn: Rgb,
     /// Problems (reserved for upcoming errors).
     pub danger: Rgb,
+    /// The theme's own accent colours, ordered so that neighbours differ the most
+    /// (blue, orange, green, purple, ...). They colour the category and application bars.
+    /// Fewer than 12 is fine: see [`Theme::category_color`] for how extra slots are made.
+    pub accents: &'static [Rgb],
 }
 
 /// The default theme (the owner's favourite, as in tuxwire and zerohour).
@@ -92,6 +97,15 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0xa7c080),
         warn: Rgb::hex(0xdbbc7f),
         danger: Rgb::hex(0xe67e80),
+        accents: &[
+            Rgb::hex(0x7fbbb3),
+            Rgb::hex(0xe69875),
+            Rgb::hex(0xa7c080),
+            Rgb::hex(0xd699b6),
+            Rgb::hex(0xdbbc7f),
+            Rgb::hex(0x83c092),
+            Rgb::hex(0xe67e80),
+        ],
     },
     // https://draculatheme.com/contribute
     Theme {
@@ -106,6 +120,15 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0x50fa7b),
         warn: Rgb::hex(0xf1fa8c),
         danger: Rgb::hex(0xff5555),
+        accents: &[
+            Rgb::hex(0x8be9fd),
+            Rgb::hex(0xffb86c),
+            Rgb::hex(0x50fa7b),
+            Rgb::hex(0xbd93f9),
+            Rgb::hex(0xf1fa8c),
+            Rgb::hex(0xff79c6),
+            Rgb::hex(0xff5555),
+        ],
     },
     // https://github.com/morhetz/gruvbox (dark)
     Theme {
@@ -120,6 +143,15 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0xb8bb26),
         warn: Rgb::hex(0xfabd2f),
         danger: Rgb::hex(0xfb4934),
+        accents: &[
+            Rgb::hex(0x83a598),
+            Rgb::hex(0xfe8019),
+            Rgb::hex(0xb8bb26),
+            Rgb::hex(0xd3869b),
+            Rgb::hex(0xfabd2f),
+            Rgb::hex(0x8ec07c),
+            Rgb::hex(0xfb4934),
+        ],
     },
     // https://catppuccin.com/palette (Mocha)
     Theme {
@@ -134,6 +166,16 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0xa6e3a1),
         warn: Rgb::hex(0xf9e2af),
         danger: Rgb::hex(0xf38ba8),
+        accents: &[
+            Rgb::hex(0x89b4fa),
+            Rgb::hex(0xfab387),
+            Rgb::hex(0xa6e3a1),
+            Rgb::hex(0xcba6f7),
+            Rgb::hex(0xf9e2af),
+            Rgb::hex(0x94e2d5),
+            Rgb::hex(0xf38ba8),
+            Rgb::hex(0xf5c2e7),
+        ],
     },
     // https://www.nordtheme.com/docs/colors-and-palettes
     Theme {
@@ -148,6 +190,15 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0xa3be8c),
         warn: Rgb::hex(0xebcb8b),
         danger: Rgb::hex(0xbf616a),
+        accents: &[
+            Rgb::hex(0x81a1c1),
+            Rgb::hex(0xd08770),
+            Rgb::hex(0xa3be8c),
+            Rgb::hex(0xb48ead),
+            Rgb::hex(0xebcb8b),
+            Rgb::hex(0x8fbcbb),
+            Rgb::hex(0xbf616a),
+        ],
     },
     // https://ethanschoonover.com/solarized/ (dark)
     Theme {
@@ -162,6 +213,16 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0x859900),
         warn: Rgb::hex(0xb58900),
         danger: Rgb::hex(0xdc322f),
+        accents: &[
+            Rgb::hex(0x268bd2),
+            Rgb::hex(0xcb4b16),
+            Rgb::hex(0x859900),
+            Rgb::hex(0x6c71c4),
+            Rgb::hex(0xb58900),
+            Rgb::hex(0x2aa198),
+            Rgb::hex(0xdc322f),
+            Rgb::hex(0xd33682),
+        ],
     },
     // https://github.com/folke/tokyonight.nvim (night)
     Theme {
@@ -176,6 +237,16 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0x9ece6a),
         warn: Rgb::hex(0xe0af68),
         danger: Rgb::hex(0xf7768e),
+        accents: &[
+            Rgb::hex(0x7aa2f7),
+            Rgb::hex(0xff9e64),
+            Rgb::hex(0x9ece6a),
+            Rgb::hex(0xbb9af7),
+            Rgb::hex(0xe0af68),
+            Rgb::hex(0x73daca),
+            Rgb::hex(0xf7768e),
+            Rgb::hex(0x7dcfff),
+        ],
     },
     // https://catppuccin.com/palette (Macchiato, tuxwire's current look)
     Theme {
@@ -190,8 +261,48 @@ pub const THEMES: &[Theme] = &[
         ok: Rgb::hex(0xa6da95),
         warn: Rgb::hex(0xeed49f),
         danger: Rgb::hex(0xed8796),
+        accents: &[
+            Rgb::hex(0x8aadf4),
+            Rgb::hex(0xf5a97f),
+            Rgb::hex(0xa6da95),
+            Rgb::hex(0xc6a0f6),
+            Rgb::hex(0xeed49f),
+            Rgb::hex(0x8bd5ca),
+            Rgb::hex(0xed8796),
+            Rgb::hex(0xf5bde6),
+        ],
     },
 ];
+
+impl Theme {
+    /// The colour of the category at `index` (its place in the config order); `None` is the
+    /// quiet "Other" colour.
+    ///
+    /// The first slots are the theme's own accents. When a theme has fewer than the 12 an
+    /// ordinary setup needs, further slots are made from the same accents: deepened
+    /// toward the background or lightened toward white, alternating along the
+    /// list so neighbouring hues differ in lightness. A setup with more than three
+    /// times the number of accents simply starts the cycle again.
+    pub fn category_color(&self, index: Option<usize>) -> Rgb {
+        let Some(i) = index else {
+            return self.muted.lerp(self.bg, 0.30);
+        };
+        let base = self.accents.len();
+        let (round, k) = ((i / base) % 3, i % base);
+        let accent = self.accents[k];
+        // Variants alternate deep / light along the accent list, so two variants of
+        // neighbouring hues never share a lightness (deep orange next to deep yellow
+        // would be hard to tell apart).
+        let deep = accent.lerp(self.bg, 0.40);
+        let light = accent.lerp(Rgb(255, 255, 255), 0.35);
+        match round {
+            0 => accent,
+            // A deepened colour that would sink into the background is lightened instead.
+            _ if (k + round) % 2 == 0 && contrast(deep, self.bg) >= 2.5 => deep,
+            _ => light,
+        }
+    }
+}
 
 /// Looks a theme up by name, ignoring upper/lower case. `None` if there is no such theme.
 pub fn find(name: &str) -> Option<&'static Theme> {
@@ -292,6 +403,35 @@ mod tests {
             assert!(contrast(t.banner_end, t.bg) >= 3.0, "{}: end on bg", t.name);
             // Borders only need to be visible, not read.
             assert!(contrast(t.border, t.bg) >= 1.5, "{}: border on bg", t.name);
+        }
+    }
+
+    /// Straight-line distance between two colours in RGB space (0 = identical).
+    fn distance(a: Rgb, b: Rgb) -> f64 {
+        let d = |x: u8, y: u8| (f64::from(x) - f64::from(y)).powi(2);
+        (d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)).sqrt()
+    }
+
+    #[test]
+    fn the_first_twelve_category_colours_are_all_different_in_every_theme() {
+        for t in THEMES {
+            let colours: Vec<Rgb> = (0..12).map(|i| t.category_color(Some(i))).collect();
+            for (i, a) in colours.iter().enumerate() {
+                for (j, b) in colours.iter().enumerate().skip(i + 1) {
+                    assert!(
+                        distance(*a, *b) >= 28.0,
+                        "{}: slots {i} and {j} are too alike ({a:?} vs {b:?})",
+                        t.name
+                    );
+                }
+                // Each must also stand out from the background, and from the "Other" grey.
+                assert!(contrast(*a, t.bg) >= 2.2, "{}: slot {i} on bg", t.name);
+                assert!(
+                    distance(*a, t.category_color(None)) >= 18.0,
+                    "{}: slot {i} looks like Other",
+                    t.name
+                );
+            }
         }
     }
 

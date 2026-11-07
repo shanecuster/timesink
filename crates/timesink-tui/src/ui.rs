@@ -83,11 +83,11 @@ impl App {
         Style::default().fg(tc(self.theme.muted))
     }
 
-    /// The colour of a category: fixed by its place in the config.
+    /// The colour of a category: its place in the config picks a slot in the current
+    /// theme's own accent list, so it stays the same until the theme changes.
     pub fn color_of(&self, category: &str) -> Color {
         let index = self.category_names.iter().position(|c| c == category);
-        let (r, g, b) = crate::palette::rgb_for(index);
-        Color::Rgb(r, g, b)
+        tc(self.theme.category_color(index))
     }
 }
 
@@ -609,9 +609,6 @@ mod tests {
     use timesink_core::appmap::AppMap;
     use timesink_core::stats::Span as TimeSpan;
 
-    /// The grey used for "Other" and unknown categories.
-    const OTHER_COLOR: Color = Color::Rgb(128, 128, 128);
-
     /// UTC for the tests.
     fn utc(_: i64) -> i64 {
         0
@@ -853,8 +850,18 @@ mod tests {
         let browser = app.color_of("Browser");
         assert_eq!(browser, app.color_of("Browser"));
         assert_ne!(browser, app.color_of("Terminal"));
-        assert_eq!(app.color_of("Other"), OTHER_COLOR);
-        assert_eq!(app.color_of("Never Heard Of It"), OTHER_COLOR);
+        // "Other" and anything unknown share the theme's quiet grey.
+        let grey = tc(app.theme.category_color(None));
+        assert_eq!(app.color_of("Other"), grey);
+        assert_eq!(app.color_of("Never Heard Of It"), grey);
+    }
+
+    #[test]
+    fn category_colours_follow_the_theme() {
+        let mut app = sample_app(View::Today);
+        let everforest = app.color_of("Browser");
+        app.theme = *timesink_core::theme::find("Nord").unwrap();
+        assert_ne!(app.color_of("Browser"), everforest);
     }
 
     #[test]
@@ -867,7 +874,7 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-        // Past the palette the colours repeat, but darker, never identical.
+        // Past the theme's own accents the colours are lighter or deeper copies, never identical.
         assert_ne!(app.color_of("cat12"), app.color_of("cat0"));
         assert_ne!(app.color_of("cat13"), app.color_of("cat1"));
     }

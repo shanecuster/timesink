@@ -158,7 +158,7 @@ Three views: **Today** (category and application bars, active time by hour,
 a coloured timeline of the day and listening time), **7 days** and **30 days**
 (a day-by-hour heatmap plus the same category and application bars). Category
 colours follow the order in which categories first appear in `apps.conf`
-(12 distinct colours; later ones repeat darker), so they stay the same on every
+(the current theme's own accents, then deeper and lighter copies), so they stay the same on every
 screen. Put your most-used categories first to keep them easy to tell apart.
 The Categories and Applications lists can be sorted by time or by name (`s`).
 
@@ -184,8 +184,10 @@ chart drops out when the window is too narrow for it; `b` turns it off.
 `t` cycles through eight themes that match tuxwire and zerohour: Everforest
 (the default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo
 Night and Catppuccin Macchiato. Themes change the text, borders, background
-and highlights; the category colours stay the same in every theme so a
-category is always recognisable. Your theme, sort order and banner choice are
+and highlights, and the bar colours too: each theme has its own accent colours
+for the categories (extra ones are deeper or lighter copies). Within a theme a
+category keeps its colour, and a test checks that the first twelve are clearly
+different, so neighbouring bars never match. Your theme, sort order and banner choice are
 remembered in `~/.config/timesink/tui.conf` (a separate file from
 `config.conf`, so saving a choice never rewrites your hand-written settings).
 You can also edit it by hand:
