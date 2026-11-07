@@ -11,8 +11,8 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
@@ -101,20 +101,57 @@ impl LineSplitter {
 }
 
 /// Where Hyprland's sockets live for the current session.
+#[derive(Debug, Clone)]
 pub struct Hypr {
     dir: PathBuf,
 }
 
 impl Hypr {
-    /// Find the socket folder from the environment Hyprland sets up.
-    pub fn from_env() -> Result<Self> {
+    /// Find the running Hyprland instance.
+    ///
+    /// Uses `HYPRLAND_INSTANCE_SIGNATURE` when it is set and still valid. When
+    /// it is missing (as in a systemd user service) or stale, scans the runtime
+    /// folder instead, so the daemon does not depend on the environment.
+    pub fn discover() -> Result<Self> {
         let runtime = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-        let Ok(signature) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") else {
-            bail!("HYPRLAND_INSTANCE_SIGNATURE is not set (is Hyprland running in this session?)");
-        };
-        Ok(Self {
-            dir: PathBuf::from(runtime).join("hypr").join(signature),
-        })
+        let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok();
+        Self::discover_in(Path::new(&runtime), signature.as_deref())
+    }
+
+    /// `discover` with the folder and signature passed in (so it can be tested).
+    pub fn discover_in(runtime: &Path, signature: Option<&str>) -> Result<Self> {
+        let base = runtime.join("hypr");
+
+        // 1. The environment variable, if it points at a live instance.
+        if let Some(signature) = signature {
+            let dir = base.join(signature);
+            if dir.join(".socket2.sock").exists() {
+                return Ok(Self { dir });
+            }
+        }
+
+        // 2. Otherwise the instance whose event socket was created most recently
+        //    (old crashed sessions can leave stale folders behind).
+        let mut newest: Option<(SystemTime, PathBuf)> = None;
+        let entries = std::fs::read_dir(&base)
+            .with_context(|| format!("no Hyprland found (cannot read {})", base.display()))?;
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let Ok(modified) = dir
+                .join(".socket2.sock")
+                .metadata()
+                .and_then(|m| m.modified())
+            else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(best, _)| modified > *best) {
+                newest = Some((modified, dir));
+            }
+        }
+        match newest {
+            Some((_, dir)) => Ok(Self { dir }),
+            None => bail!("no running Hyprland found in {}", base.display()),
+        }
     }
 
     /// Ask Hyprland which window is focused right now.
@@ -235,6 +272,45 @@ mod tests {
             vec!["activewindow>>zen,Title", "workspace>>2"]
         );
         assert_eq!(s.push(b"edmon>>DP-1\n"), vec!["focusedmon>>DP-1"]);
+    }
+
+    /// Make `<runtime>/hypr/<name>/.socket2.sock` exist (a real socket file).
+    fn fake_instance(runtime: &Path, name: &str) -> UnixListener {
+        let dir = runtime.join("hypr").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        UnixListener::bind(dir.join(".socket2.sock")).unwrap()
+    }
+
+    #[test]
+    fn discovery_prefers_a_valid_signature() {
+        let runtime = std::env::temp_dir().join(format!("timesink-disc1-{}", std::process::id()));
+        let _a = fake_instance(&runtime, "aaa");
+        let _b = fake_instance(&runtime, "bbb");
+        let hypr = Hypr::discover_in(&runtime, Some("aaa")).unwrap();
+        assert!(hypr.dir.ends_with("aaa"));
+        std::fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn discovery_falls_back_to_the_newest_instance() {
+        let runtime = std::env::temp_dir().join(format!("timesink-disc2-{}", std::process::id()));
+        let _old = fake_instance(&runtime, "old");
+        std::thread::sleep(Duration::from_millis(50));
+        let _new = fake_instance(&runtime, "new");
+        // No signature, or a stale one: both pick the newest instance.
+        for signature in [None, Some("gone")] {
+            let hypr = Hypr::discover_in(&runtime, signature).unwrap();
+            assert!(hypr.dir.ends_with("new"), "{signature:?}");
+        }
+        std::fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn discovery_fails_cleanly_without_hyprland() {
+        let runtime = std::env::temp_dir().join(format!("timesink-disc3-{}", std::process::id()));
+        std::fs::create_dir_all(runtime.join("hypr")).unwrap();
+        assert!(Hypr::discover_in(&runtime, None).is_err());
+        std::fs::remove_dir_all(&runtime).unwrap();
     }
 
     #[test]
