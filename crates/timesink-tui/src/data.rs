@@ -6,6 +6,8 @@
 use anyhow::Result;
 use timesink_core::appmap::{AppMap, AppTotal};
 use timesink_core::db::Db;
+use timesink_core::domains::{self, DomainConfig};
+use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Segment, Span};
 
 /// Which period is shown.
@@ -84,6 +86,75 @@ pub struct TimelineBlock {
     pub category: String,
 }
 
+/// Time on one website (from the optional browser extension).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteTotal {
+    /// The registered site, e.g. `github.com`.
+    pub site: String,
+    /// Friendly name from `domains.conf` (the site itself when unlisted).
+    pub display: String,
+    /// Category from `domains.conf` (`Other` when unlisted).
+    pub category: String,
+    /// Seconds.
+    pub secs: i64,
+}
+
+/// The stretches of time each site was in front of you: the site stretches reported by the
+/// extension, cut down to the times the browser was the focused, non-idle window.
+/// `sites` are (site, start, end) rows; `intervals` are the ordinary focus rows.
+pub fn site_spans(
+    sites: &[(String, i64, i64)],
+    intervals: &[StoredInterval],
+    config: &DomainConfig,
+) -> Vec<Span> {
+    let domain: Vec<Span> = sites
+        .iter()
+        .map(|(site, start, end)| Span {
+            start: *start,
+            end: *end,
+            key: site.clone(),
+        })
+        .collect();
+    let focus: Vec<Span> = intervals
+        .iter()
+        .filter(|i| config.is_browser(&i.app_class))
+        .map(|i| Span {
+            start: i.start_ts,
+            end: i.end_ts,
+            key: i.app_class.clone(),
+        })
+        .collect();
+    domains::intersect(&domain, &focus)
+}
+
+/// Per-site totals (names and categories applied) for the stretches in `spans`, clipped to
+/// `[from, to)`, biggest first.
+pub fn site_totals(spans: &[Span], config: &DomainConfig, from: i64, to: i64) -> Vec<SiteTotal> {
+    let clipped: Vec<Span> = spans
+        .iter()
+        .filter_map(|s| {
+            let (start, end) = (s.start.max(from), s.end.min(to));
+            (end > start).then(|| Span {
+                start,
+                end,
+                key: s.key.clone(),
+            })
+        })
+        .collect();
+    domains::totals(&clipped)
+        .into_iter()
+        .map(|(site, secs)| {
+            let info = config.sites.lookup(&site);
+            SiteTotal {
+                site,
+                display: info.display,
+                category: info.category,
+                secs,
+            }
+        })
+        .collect()
+}
+
 /// All numbers for one screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -107,9 +178,33 @@ pub struct Snapshot {
     pub listening_total: i64,
     /// Seconds since local midnight right now (for the "now" marker).
     pub now_secs: i64,
+    /// Time on websites, biggest first. Empty unless the browser extension is in use.
+    pub sites: Vec<SiteTotal>,
 }
 
 impl Snapshot {
+    /// Fill in the website time for this snapshot's period (a no-op when the extension has
+    /// recorded nothing). Kept apart from `load` so the app maps stay the only thing that
+    /// function needs.
+    pub fn attach_sites(
+        &mut self,
+        db: &Db,
+        config: &DomainConfig,
+        now: i64,
+        tz: &dyn Fn(i64) -> i64,
+    ) -> Result<()> {
+        let from = stats::day_start_utc(self.today - (self.view.days() - 1), tz);
+        let rows = db.domains_between(from, now + 1)?;
+        if rows.is_empty() {
+            self.sites.clear();
+            return Ok(());
+        }
+        let intervals = db.intervals_between(from, now + 1)?;
+        let spans = site_spans(&rows, &intervals, config);
+        self.sites = site_totals(&spans, config, from, now + 1);
+        Ok(())
+    }
+
     /// Read the rows for `view` from the database and work out the numbers.
     pub fn load(
         db: &Db,
@@ -235,6 +330,7 @@ impl Snapshot {
             listening: listening_by_player,
             listening_total,
             now_secs: (now + tz(now)).rem_euclid(86400),
+            sites: Vec::new(),
         }
     }
 }
@@ -340,5 +436,35 @@ mod tests {
         assert_eq!(View::Today.next(), View::Week);
         assert_eq!(View::Month.next(), View::Today);
         assert_eq!(View::Today.prev(), View::Month);
+    }
+
+    #[test]
+    fn site_time_counts_only_while_the_browser_has_focus() {
+        let config = DomainConfig::from_conf("browser = zen\ngithub.com github Research\n");
+        let focus = |start, end, class: &str| StoredInterval {
+            id: 1,
+            device_id: "d".into(),
+            start_ts: start,
+            end_ts: end,
+            app_class: class.into(),
+            title: String::new(),
+            workspace: "1".into(),
+        };
+        // github.com was the active tab for 0..100; zen was focused 10..40, the terminal
+        // 40..60 (so those 20s must not count), zen again 60..70.
+        let sites = vec![("github.com".to_string(), 0, 100)];
+        let intervals = vec![
+            focus(10, 40, "zen"),
+            focus(40, 60, "wezterm"),
+            focus(60, 70, "zen"),
+        ];
+        let spans = site_spans(&sites, &intervals, &config);
+        let totals = site_totals(&spans, &config, 0, 1000);
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].secs, 40);
+        assert_eq!(totals[0].display, "github");
+        assert_eq!(totals[0].category, "Research");
+        // Clipping to a later window removes the earlier time.
+        assert_eq!(site_totals(&spans, &config, 60, 1000)[0].secs, 10);
     }
 }

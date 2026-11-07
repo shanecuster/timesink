@@ -12,10 +12,11 @@
 use chrono::{DateTime, FixedOffset};
 use serde_json::json;
 use timesink_core::appmap::AppMap;
+use timesink_core::domains::DomainConfig;
 use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Span};
 
-use crate::data::{Snapshot, View};
+use crate::data::{self, Snapshot, View};
 use crate::palette;
 use crate::ui::fmt_duration;
 
@@ -68,7 +69,8 @@ impl Format {
 /// One recorded row, ready to write out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRow {
-    /// `focus` (a window had focus) or `listening` (a player was playing).
+    /// `focus` (a window had focus), `listening` (a player was playing) or `site` (a website
+    /// was the active tab while the browser had focus).
     pub kind: &'static str,
     /// Start as local time, ISO 8601 with offset.
     pub start: String,
@@ -92,6 +94,19 @@ pub struct AppLine {
     /// Friendly name.
     pub name: String,
     /// Its category.
+    pub category: String,
+    /// Seconds.
+    pub secs: i64,
+}
+
+/// One website line of the summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteLine {
+    /// The registered site, e.g. `github.com`.
+    pub site: String,
+    /// Friendly name from `domains.conf`.
+    pub name: String,
+    /// Category from `domains.conf`.
     pub category: String,
     /// Seconds.
     pub secs: i64,
@@ -135,6 +150,8 @@ pub struct ReportData {
     pub rows: Vec<RawRow>,
     /// Category names in config order, which decides their colours.
     pub category_names: Vec<String>,
+    /// Seconds per website, biggest first (empty without the browser extension).
+    pub sites: Vec<SiteLine>,
 }
 
 /// Name for a period of `days` days.
@@ -279,7 +296,51 @@ impl ReportData {
             listening_total: snap.listening_total,
             rows: rows.into_iter().map(|(_, r)| r).collect(),
             category_names: map.categories(),
+            sites: Vec::new(),
         }
+    }
+
+    /// Add website time: the summary lines and one raw `site` row per stretch. `spans` are
+    /// the site stretches already cut down to browser focus (see `data::site_spans`).
+    pub fn with_sites(
+        mut self,
+        spans: &[Span],
+        config: &DomainConfig,
+        days: i64,
+        now: i64,
+        tz: &dyn Fn(i64) -> i64,
+    ) -> ReportData {
+        let today = stats::local_day(now, tz);
+        let from = stats::day_start_utc(today - (days.max(1) - 1), tz);
+        self.sites = data::site_totals(spans, config, from, now)
+            .into_iter()
+            .map(|t| SiteLine {
+                site: t.site,
+                name: t.display,
+                category: t.category,
+                secs: t.secs,
+            })
+            .collect();
+        for s in spans {
+            let (start, end) = (s.start.max(from), s.end.min(now));
+            if end <= start {
+                continue;
+            }
+            let info = config.sites.lookup(&s.key);
+            self.rows.push(RawRow {
+                kind: "site",
+                start: format_time(start, tz),
+                end: format_time(end, tz),
+                seconds: end - start,
+                app: info.display,
+                category: info.category,
+                raw_class: s.key.clone(),
+                detail: String::new(),
+            });
+        }
+        // Keep the rows in time order (the local ISO strings sort correctly).
+        self.rows.sort_by(|a, b| a.start.cmp(&b.start));
+        self
     }
 }
 
@@ -339,6 +400,9 @@ pub fn to_json(data: &ReportData) -> String {
             .collect::<Vec<_>>(),
         "apps": data.apps.iter()
             .map(|a| json!({"name": a.name, "category": a.category, "seconds": a.secs}))
+            .collect::<Vec<_>>(),
+        "sites": data.sites.iter()
+            .map(|s| json!({"site": s.site, "name": s.name, "category": s.category, "seconds": s.secs}))
             .collect::<Vec<_>>(),
         "days": data.days.iter()
             .map(|d| json!({
@@ -432,6 +496,18 @@ pub fn to_markdown(data: &ReportData) -> String {
             fmt_duration(app.secs),
             share(app.secs, data.total)
         ));
+    }
+
+    if !data.sites.is_empty() {
+        out.push_str("\n## Sites\n\nWebsite time from the browser extension (main site only), counted while the browser was in front.\n\n| Site | Category | Time |\n| --- | --- | ---: |\n");
+        for site in &data.sites {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                md_cell(&site.name),
+                md_cell(&site.category),
+                fmt_duration(site.secs)
+            ));
+        }
     }
 
     out.push_str("\n## Days\n\n| Date | Active | Listening |\n| --- | ---: | ---: |\n");
@@ -549,6 +625,19 @@ pub fn to_html(data: &ReportData) -> String {
             max,
             &colour_of(&app.category),
         ));
+    }
+
+    if !data.sites.is_empty() {
+        out.push_str("<h2>Sites</h2>\n");
+        let max = data.sites.iter().map(|s| s.secs).max().unwrap_or(0);
+        for site in &data.sites {
+            out.push_str(&html_bar(
+                &site.name,
+                site.secs,
+                max,
+                &palette::hex_for(None),
+            ));
+        }
     }
 
     out.push_str("<h2>Days</h2>\n<table>\n<tr><th>Date</th><th class=\"n\">Active</th><th class=\"n\">Listening</th></tr>\n");
@@ -762,5 +851,52 @@ mod tests {
         // 20:00 UTC is 15:00 at -05:00.
         assert_eq!(format_time(NOW, &minus5), "1970-04-11T15:00:00-05:00");
         assert_eq!(format_time(NOW, &|_| 0), "1970-04-11T20:00:00+00:00");
+    }
+
+    /// The sample report plus an hour on one site and ten minutes on a hostile-looking one.
+    fn with_sites() -> ReportData {
+        let config = DomainConfig::from_conf("github.com github Research\n");
+        let spans = vec![
+            Span {
+                start: NOW - 7200,
+                end: NOW - 3600,
+                key: "github.com".into(),
+            },
+            Span {
+                start: NOW - 3000,
+                end: NOW - 2400,
+                key: "<b>x</b>.example".into(),
+            },
+        ];
+        sample().with_sites(&spans, &config, 7, NOW, &minus5)
+    }
+
+    #[test]
+    fn site_time_appears_in_every_format() {
+        let r = with_sites();
+        assert_eq!(r.sites[0].site, "github.com");
+        assert_eq!(r.sites[0].secs, 3600);
+        assert_eq!(r.rows.iter().filter(|x| x.kind == "site").count(), 2);
+        assert!(r.rows.windows(2).all(|w| w[0].start <= w[1].start));
+
+        assert!(to_csv(&r).contains("site,"));
+        let v: serde_json::Value = serde_json::from_str(&to_json(&r)).unwrap();
+        assert_eq!(v["sites"][0]["name"], "github");
+        assert_eq!(v["sites"][0]["seconds"], 3600);
+        assert!(to_markdown(&r).contains("## Sites"));
+        let html = to_html(&r);
+        assert!(html.contains("<h2>Sites</h2>"));
+        // Site names come from outside, so they are escaped like everything else.
+        assert!(!html.contains("<b>x</b>"));
+    }
+
+    #[test]
+    fn without_site_time_there_is_no_sites_section() {
+        let r = sample();
+        assert!(r.sites.is_empty());
+        assert!(!to_markdown(&r).contains("## Sites"));
+        assert!(!to_html(&r).contains("<h2>Sites</h2>"));
+        let v: serde_json::Value = serde_json::from_str(&to_json(&r)).unwrap();
+        assert_eq!(v["sites"].as_array().unwrap().len(), 0);
     }
 }

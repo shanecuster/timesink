@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use timesink_core::appmap::AppMap;
 use timesink_core::db::Db;
+use timesink_core::paths;
 use timesink_core::stats;
 
+use crate::data;
 use crate::export::{format_time, Format, ReportData};
 
 /// Short word for a period in file names: `today`, `week`, `month`, `45days`.
@@ -116,9 +118,15 @@ pub fn collect(
     let from = stats::day_start_utc(today - (days.max(1) - 1), tz);
     let intervals = db.intervals_between(from, now + 1)?;
     let listening = db.listening_between(from, now + 1)?;
-    Ok(ReportData::build(
-        &intervals, &listening, map, days, now, tz,
-    ))
+    let report = ReportData::build(&intervals, &listening, map, days, now, tz);
+    // Website time, only when the browser extension has recorded some.
+    let sites = db.domains_between(from, now + 1)?;
+    if sites.is_empty() {
+        return Ok(report);
+    }
+    let config = paths::load_domain_config().unwrap_or_default();
+    let spans = data::site_spans(&sites, &intervals, &config);
+    Ok(report.with_sites(&spans, &config, days, now, tz))
 }
 
 /// Local date of `now` as `YYYY-MM-DD`, for file names.

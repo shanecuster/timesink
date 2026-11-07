@@ -113,11 +113,15 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         theme: *theme::find_or_default(&settings.theme),
         banner: settings.banner,
         assign: assign::Assign::Closed,
+        site_categories: Vec::new(),
         export_menu: false,
         notice: None,
         show_help: false,
         status: None,
     };
+
+    // Website time, if the browser extension has recorded any.
+    attach_sites(&mut app, &db);
 
     // Restores the terminal even if drawing panics.
     let mut terminal = ratatui::init();
@@ -282,12 +286,26 @@ fn export_view(db: &Db, map: &AppMap, format: Format, view: View) -> String {
     }
 }
 
+/// Add website time to the current snapshot. A problem here is not worth interrupting the
+/// screen for: the Sites panel just stays empty.
+fn attach_sites(app: &mut App, db: &Db) {
+    let config = paths::load_domain_config().unwrap_or_default();
+    app.site_categories = config.sites.categories();
+    if let Err(e) = app
+        .snapshot
+        .attach_sites(db, &config, now_ts(), &local_offset)
+    {
+        app.status = Some(format!(" could not read website time: {e:#}"));
+    }
+}
+
 /// Recompute the numbers. A failure is shown in the footer, not fatal.
 fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     match Snapshot::load(db, map, view, now_ts(), &local_offset) {
         Ok(snapshot) => {
             app.snapshot = snapshot;
             app.status = None;
+            attach_sites(app, db);
         }
         Err(e) => app.status = Some(format!(" could not read the database: {e:#}")),
     }

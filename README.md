@@ -154,7 +154,7 @@ cargo install --path crates/timesink-tui
 timesink
 ```
 
-Three views: **Today** (category and application bars, active time by hour,
+Three views (a Sites panel is added when the optional browser extension has recorded website time): **Today** (category and application bars, active time by hour,
 a coloured timeline of the day and listening time), **7 days** and **30 days**
 (a day-by-hour heatmap plus the same category and application bars). Category
 colours follow the order in which categories first appear in `apps.conf`
@@ -206,6 +206,54 @@ theme = Nord
 sort = name
 banner = on
 ```
+
+## Website time (optional Zen / Firefox extension)
+
+Off by default. Without the extension timesink records only *which application*
+was in front, never what was in it. With it, you also get time per website, as
+the **main domain only** (`gist.github.com` is recorded as `github.com`). The
+page path, query, title and content are never read, sent or stored.
+
+How it stays private and accurate:
+
+- The extension sends only the active tab's host name, every 30 seconds and when
+  the tab or window changes. It has no network access.
+- It does not run in private windows at all (and reports "nothing" while one is
+  in front).
+- A small helper program (`timesink-zen-host`) receives the host name through
+  the browser's native-messaging channel (no open port), reduces it to the main
+  site, drops anything on your block list and writes it to the local database.
+- Site time counts only while the browser was the focused, non-idle window, so
+  background tabs, idle time and other apps never add up. It is shown in a
+  separate **Sites** panel, not added to the totals.
+
+Set it up:
+
+```
+cargo install --path crates/timesink-zen          # installs timesink-zen-host
+timesink-zen-host install                         # registers it with Zen and Firefox
+cp contrib/domains.conf.example ~/.config/timesink/domains.conf   # optional
+```
+
+Then load the extension from the `extension/` folder:
+
+- To try it: open `about:debugging#/runtime/this-firefox`, choose **Load
+  Temporary Add-on** and pick `extension/manifest.json`. It lasts until the
+  browser restarts.
+- To keep it: sign it privately (free, "unlisted") with
+  `web-ext sign --channel=unlisted --source-dir extension` using your own addons.mozilla.org
+  API keys (keep those out of the repo), then open the resulting `.xpi` in the
+  browser. Release builds of Firefox-based browsers only accept signed add-ons.
+
+`domains.conf` (see `contrib/domains.conf.example`) holds the browser's window
+class (`browser = zen`), sites to never record (`block = site`) and friendly
+names and categories for sites, in the same layout as `apps.conf`.
+
+Delete what was stored: `timesink-zen-host forget --all`, or
+`timesink-zen-host forget github.com` for one site. `timesink-zen-host uninstall`
+removes the registration. This part was tested end to end against the helper and
+with a simulated browser; check it in your own Zen before relying on it, since the
+exact add-on loading steps can differ between Zen versions.
 
 ## Exports and backups
 

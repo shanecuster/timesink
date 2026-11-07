@@ -38,6 +38,8 @@ pub struct App {
     pub banner: bool,
     /// The application name / category editor (the `a` key).
     pub assign: Assign,
+    /// Site categories from `domains.conf`, in order, for the Sites bar colours.
+    pub site_categories: Vec<String>,
 }
 
 /// A theme colour as a terminal colour.
@@ -244,9 +246,16 @@ fn draw_range(frame: &mut Frame, area: Rect, app: &App) {
 /// Category bars above application bars, in the chosen order.
 fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snapshot;
-    let [cat_area, app_area] = Layout::vertical([
+    // Sites get their own panel only when the browser extension has recorded something.
+    let sites_h = if snap.sites.is_empty() {
+        0
+    } else {
+        (snap.sites.len() as u16 + 2).clamp(4, 9)
+    };
+    let [cat_area, app_area, sites_area] = Layout::vertical([
         Constraint::Length((snap.categories.len() as u16 + 2).clamp(4, 12)),
         Constraint::Min(3),
+        Constraint::Length(sites_h),
     ])
     .areas(area);
 
@@ -313,6 +322,42 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
                 .title(format!(" Applications · {} ", app.sort.label())),
         ),
         app_area,
+    );
+
+    if sites_h > 0 {
+        draw_sites(frame, sites_area, app);
+    }
+}
+
+/// Website time (domains only), shown when the optional browser extension is in use.
+fn draw_sites(frame: &mut Frame, area: Rect, app: &App) {
+    let mut sites = app.snapshot.sites.clone();
+    if app.sort == SortMode::Name {
+        sites.sort_by_key(|s| s.display.to_lowercase());
+    }
+    let max = sites.iter().map(|s| s.secs).max().unwrap_or(1).max(1);
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let rows = area.height.saturating_sub(2) as usize;
+    let lines: Vec<Line> = sites
+        .iter()
+        .take(rows)
+        .map(|s| {
+            // Colour by the site's category, using the same theme accents as the apps.
+            let index = app.site_categories.iter().position(|c| *c == s.category);
+            bar_line(
+                &s.display,
+                s.secs,
+                max,
+                inner_w,
+                tc(app.theme.category_color(index)),
+                14,
+                tc(app.theme.border),
+            )
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(app.block(format!(" Sites · {} ", app.sort.label()))),
+        area,
     );
 }
 
@@ -766,6 +811,7 @@ mod tests {
             theme: timesink_core::theme::THEMES[0],
             banner: true,
             assign: Assign::Closed,
+            site_categories: Vec::new(),
         }
     }
 
@@ -872,6 +918,7 @@ mod tests {
             theme: timesink_core::theme::THEMES[0],
             banner: true,
             assign: Assign::Closed,
+            site_categories: Vec::new(),
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));
@@ -971,6 +1018,38 @@ mod tests {
         assert!(screen.contains("+ new category"), "{screen}");
         // And it survives tiny terminals.
         for (w, h) in [(1, 1), (30, 6), (60, 10)] {
+            let _ = render(&app, w, h);
+        }
+    }
+
+    #[test]
+    fn sites_panel_appears_only_when_there_is_website_time() {
+        let mut app = sample_app(View::Today);
+        assert!(!render(&app, 120, 40).contains("Sites"));
+        app.snapshot.sites = vec![
+            crate::data::SiteTotal {
+                site: "github.com".into(),
+                display: "github".into(),
+                category: "Research".into(),
+                secs: 5400,
+            },
+            crate::data::SiteTotal {
+                site: "bbc.co.uk".into(),
+                display: "bbc.co.uk".into(),
+                category: "Other".into(),
+                secs: 600,
+            },
+        ];
+        app.site_categories = vec!["Research".into()];
+        for view in [View::Today, View::Week] {
+            app.snapshot.view = view;
+            let screen = render(&app, 120, 45);
+            assert!(screen.contains("Sites"), "{screen}");
+            assert!(screen.contains("github"), "{screen}");
+            assert!(screen.contains("1h 30m"), "{screen}");
+        }
+        // Small terminals must not panic with the extra panel.
+        for (w, h) in [(30, 8), (60, 14), (100, 24)] {
             let _ = render(&app, w, h);
         }
     }
