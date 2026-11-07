@@ -14,6 +14,8 @@ pub mod model;
 pub mod paths;
 pub mod presence;
 pub mod sanitize;
+pub mod settings;
 pub mod stats;
+pub mod theme;
 pub mod title;
 pub mod tracker;

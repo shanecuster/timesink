@@ -74,3 +74,8 @@ pub fn load_app_map() -> Result<AppMap> {
         .map(|text| AppMap::from_conf(&text))
         .unwrap_or_default())
 }
+
+/// Where the interface remembers its choices: `tui.conf` in the config folder.
+pub fn tui_settings_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("tui.conf"))
+}
