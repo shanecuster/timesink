@@ -15,7 +15,7 @@ use crate::tracker::Effect;
 
 /// Version of the database layout. Bump it and add a migration step when the
 /// layout changes. Stored in SQLite's built-in `user_version` field.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Intervals shorter than this many seconds are deleted when they close.
 /// This drops the flicker from quickly passing over windows.
@@ -71,6 +71,9 @@ impl Db {
     fn init(conn: Connection, device_id: &str) -> Result<Self> {
         // WAL mode lets the TUI read while the daemon writes.
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // The daemon and the browser extension's helper both write; wait briefly for each
+        // other instead of failing with "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version = read_user_version(&conn)?;
         if version < 1 {
             // Fresh database: create version 1 of the layout.
@@ -99,6 +102,23 @@ impl Db {
                      player    TEXT    NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_listening_start ON listening(start_ts);",
+            )?;
+        }
+        if version < 3 {
+            // Version 3 adds website time from the optional browser extension. Only the
+            // registered site (e.g. "github.com") is stored: no path, query or title.
+            // `closed` = 1 once the extension said no tracked site is in front, so a later
+            // report of the same site starts a fresh stretch instead of bridging the gap.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS domains (
+                     id        INTEGER PRIMARY KEY,
+                     device_id TEXT    NOT NULL,
+                     start_ts  INTEGER NOT NULL,
+                     end_ts    INTEGER NOT NULL,
+                     domain    TEXT    NOT NULL,
+                     closed    INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_domains_start ON domains(start_ts);",
             )?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -336,6 +356,89 @@ impl Db {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("reading listening rows")
+    }
+}
+
+impl Db {
+    /// Record what the browser extension just reported: `Some(site)` = this site is the
+    /// active tab of the focused window, `None` = nothing trackable is in front (another
+    /// window, a private window, a blocked or internal page).
+    ///
+    /// The report either extends the open stretch (same site, reported within
+    /// [`crate::domains::DOMAIN_GAP_SECS`]), starts a new one, or closes the open one.
+    pub fn record_domain(&self, now: i64, site: Option<&str>) -> Result<()> {
+        use crate::domains::DOMAIN_GAP_SECS;
+        // The newest stretch of this computer, if any.
+        let last: Option<(i64, i64, String, bool)> = self
+            .conn
+            .query_row(
+                "SELECT id, end_ts, domain, closed FROM domains
+                 WHERE device_id = ?1 ORDER BY id DESC LIMIT 1",
+                [&self.device_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
+            )
+            .ok();
+        // An open stretch whose last report is recent enough to continue.
+        let live = last
+            .as_ref()
+            .filter(|(_, end, _, closed)| !closed && now - end <= DOMAIN_GAP_SECS);
+        match (site, live) {
+            // Same site again: move the end forward.
+            (Some(d), Some((id, _, last_domain, _))) if last_domain == d => {
+                self.conn.execute(
+                    "UPDATE domains SET end_ts = ?1 WHERE id = ?2",
+                    params![now, id],
+                )?;
+            }
+            // A different site (or the first): close any open stretch at `now`, start anew.
+            (Some(d), live) => {
+                if let Some((id, _, _, _)) = live {
+                    self.conn.execute(
+                        "UPDATE domains SET end_ts = ?1, closed = 1 WHERE id = ?2",
+                        params![now, id],
+                    )?;
+                }
+                self.conn.execute(
+                    "INSERT INTO domains (device_id, start_ts, end_ts, domain, closed)
+                     VALUES (?1, ?2, ?2, ?3, 0)",
+                    params![self.device_id, now, d],
+                )?;
+            }
+            // Nothing trackable in front: end the open stretch now.
+            (None, Some((id, _, _, _))) => {
+                self.conn.execute(
+                    "UPDATE domains SET end_ts = ?1, closed = 1 WHERE id = ?2",
+                    params![now, id],
+                )?;
+            }
+            // Nothing in front and nothing open (a stale one is simply left as it was).
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    /// All site stretches that overlap `[from_ts, to_ts)` as (site, start, end), oldest first.
+    pub fn domains_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT domain, start_ts, end_ts FROM domains
+             WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading site rows")
+    }
+
+    /// Delete stored site time: all of it, or just one site. Returns how many rows went.
+    pub fn forget_domains(&self, site: Option<&str>) -> Result<usize> {
+        let n = match site {
+            Some(d) => self
+                .conn
+                .execute("DELETE FROM domains WHERE domain = ?1", [d])?,
+            None => self.conn.execute("DELETE FROM domains", [])?,
+        };
+        Ok(n)
     }
 }
 
@@ -998,5 +1101,50 @@ mod listening_tests {
         assert_eq!(rows, vec![("a".to_string(), 100, 200)]);
         assert_eq!(r.db().listening_between(0, 1000).unwrap().len(), 2);
         assert!(r.db().intervals_between(0, 1000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn site_reports_extend_start_and_close_stretches() {
+        let db = Db::open_in_memory("test").unwrap();
+        db.record_domain(100, Some("github.com")).unwrap();
+        db.record_domain(130, Some("github.com")).unwrap();
+        db.record_domain(160, Some("github.com")).unwrap();
+        // Switching sites closes the first stretch at the switch time.
+        db.record_domain(190, Some("wikipedia.org")).unwrap();
+        db.record_domain(220, None).unwrap();
+        // The same site again after a "none" starts a fresh stretch, not a bridge.
+        db.record_domain(250, Some("wikipedia.org")).unwrap();
+        let rows = db.domains_between(0, 1000).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("github.com".to_string(), 100, 190),
+                ("wikipedia.org".to_string(), 190, 220),
+                ("wikipedia.org".to_string(), 250, 250),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_silence_does_not_invent_time() {
+        let db = Db::open_in_memory("test").unwrap();
+        db.record_domain(100, Some("github.com")).unwrap();
+        db.record_domain(130, Some("github.com")).unwrap();
+        // The extension went quiet (browser closed, machine asleep) for 10 minutes.
+        db.record_domain(730, Some("github.com")).unwrap();
+        let rows = db.domains_between(0, 2000).unwrap();
+        assert_eq!(rows[0], ("github.com".to_string(), 100, 130));
+        assert_eq!(rows[1].1, 730);
+    }
+
+    #[test]
+    fn forgetting_one_site_or_all() {
+        let db = Db::open_in_memory("test").unwrap();
+        db.record_domain(10, Some("a.com")).unwrap();
+        db.record_domain(50, Some("b.com")).unwrap();
+        assert_eq!(db.forget_domains(Some("a.com")).unwrap(), 1);
+        assert_eq!(db.domains_between(0, 100).unwrap().len(), 1);
+        assert_eq!(db.forget_domains(None).unwrap(), 1);
+        assert!(db.domains_between(0, 100).unwrap().is_empty());
     }
 }
