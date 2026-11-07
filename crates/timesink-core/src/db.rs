@@ -662,3 +662,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod merge_regression {
+    use super::*;
+
+    /// Per-app total seconds, straight from the table.
+    fn totals(db: &Db) -> std::collections::BTreeMap<String, i64> {
+        db.totals_since(0).unwrap().into_iter().collect()
+    }
+
+    #[test]
+    fn merging_never_loses_time_for_any_app() {
+        let db = Db::open_in_memory("box").unwrap();
+        // Pseudo-random but repeatable rows: a few apps, small gaps, short durations.
+        let apps = ["discord", "zen", "nautilus", "wezterm"];
+        let mut seed: u64 = 12345;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut t = 1000;
+        for _ in 0..600 {
+            let app = apps[next(4) as usize];
+            let dur = 1 + next(40) as i64;
+            let gap = [0, 0, 1, 2, 5, 30][next(6) as usize];
+            let snapshot = WindowSnapshot {
+                app_class: app.into(),
+                title: String::new(),
+                workspace: "1".into(),
+            };
+            let id = db.insert_open(t, &snapshot).unwrap();
+            db.finish(id, t + dur).unwrap();
+            t += dur + gap;
+        }
+        let before = totals(&db);
+        let removed = db.merge_adjacent(MERGE_GAP_SECS).unwrap();
+        let after = totals(&db);
+        assert!(removed > 0, "the test data should contain mergeable rows");
+        for (app, secs) in &before {
+            assert!(
+                after[app] >= *secs,
+                "{app}: {secs}s before, {}s after merging",
+                after[app]
+            );
+        }
+    }
+}
