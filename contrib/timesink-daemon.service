@@ -1,0 +1,25 @@
+# systemd user service for timesink.
+#
+# Install (one time):
+#   cargo install --path crates/timesink-daemon        # puts the binary in ~/.cargo/bin
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/timesink-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now timesink-daemon
+#
+# Check it:   systemctl --user status timesink-daemon
+# Watch logs: journalctl --user -u timesink-daemon -f
+[Unit]
+Description=timesink screen-time collector
+
+[Service]
+# %h is your home folder. Change this if the binary lives somewhere else.
+ExecStart=%h/.cargo/bin/timesink-daemon run
+# The daemon keeps running when Hyprland or the compositor goes away, so a
+# restart only happens after a real crash.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# Start at login. The daemon waits by itself until Hyprland is available.
+WantedBy=default.target
