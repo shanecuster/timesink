@@ -301,6 +301,45 @@ impl Db {
 }
 
 impl Db {
+    /// All focus rows that overlap `[from_ts, to_ts)`, oldest first.
+    /// Rows are returned whole; callers clip them to the range.
+    pub fn intervals_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<StoredInterval>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, device_id, start_ts, end_ts, app_class, title, workspace
+             FROM intervals WHERE end_ts > ?1 AND start_ts < ?2
+             ORDER BY start_ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+            Ok(StoredInterval {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                start_ts: row.get(2)?,
+                end_ts: row.get(3)?,
+                app_class: row.get(4)?,
+                title: row.get(5)?,
+                workspace: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading intervals")
+    }
+
+    /// All listening rows that overlap `[from_ts, to_ts)` as
+    /// (player, start, end), oldest first.
+    pub fn listening_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT player, start_ts, end_ts FROM listening
+             WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading listening rows")
+    }
+}
+
+impl Db {
     /// Write a consistent copy of the whole database to `path`.
     ///
     /// Uses SQLite's `VACUUM INTO`, which is safe even while the daemon is
@@ -946,5 +985,18 @@ mod listening_tests {
         );
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn range_queries_return_overlapping_rows_only() {
+        let mut r = Recorder::new(Db::open_in_memory("box").unwrap());
+        r.apply_listen(&[open(100, "a"), ListenEffect::Closed { end_ts: 200 }])
+            .unwrap();
+        r.apply_listen(&[open(500, "b"), ListenEffect::Closed { end_ts: 600 }])
+            .unwrap();
+        let rows = r.db().listening_between(150, 300).unwrap();
+        assert_eq!(rows, vec![("a".to_string(), 100, 200)]);
+        assert_eq!(r.db().listening_between(0, 1000).unwrap().len(), 2);
+        assert!(r.db().intervals_between(0, 1000).unwrap().is_empty());
     }
 }
