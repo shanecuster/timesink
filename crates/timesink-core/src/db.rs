@@ -20,6 +20,10 @@ pub const SCHEMA_VERSION: i32 = 1;
 /// This drops the flicker from quickly passing over windows.
 pub const MIN_INTERVAL_SECS: i64 = 1;
 
+/// A new interval that starts within this many seconds of the previous one
+/// ending, with the exact same window, is joined to it instead of being a new row.
+pub const MERGE_GAP_SECS: i64 = 2;
+
 /// A handle to the timesink database.
 pub struct Db {
     conn: Connection,
@@ -127,6 +131,45 @@ impl Db {
         Ok(())
     }
 
+    /// Find the row a new interval should be joined to, if any.
+    ///
+    /// Only the most recently ended row of this device qualifies, and only if it
+    /// is the same window and ended no more than `max_gap` seconds before
+    /// `start_ts`. Looking at the latest row only guarantees we never join across
+    /// a different activity that was recorded in between.
+    pub fn find_mergeable(
+        &self,
+        start_ts: i64,
+        snapshot: &WindowSnapshot,
+        max_gap: i64,
+    ) -> Result<Option<i64>> {
+        let latest = self.conn.query_row(
+            "SELECT id, end_ts, app_class, title, workspace FROM intervals
+             WHERE device_id = ?1 ORDER BY end_ts DESC, id DESC LIMIT 1",
+            [&self.device_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        );
+        match latest {
+            Ok((id, end_ts, class, title, workspace)) => {
+                let same = class == snapshot.app_class
+                    && title == snapshot.title
+                    && workspace == snapshot.workspace;
+                Ok((same && start_ts - end_ts <= max_gap).then_some(id))
+            }
+            // An empty table simply has nothing to merge with.
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// The most recent intervals, newest first.
     pub fn recent(&self, limit: usize) -> Result<Vec<StoredInterval>> {
         let mut stmt = self.conn.prepare(
@@ -186,7 +229,16 @@ impl Recorder {
         for effect in effects {
             match effect {
                 Effect::Opened { start_ts, snapshot } => {
-                    self.open_id = Some(self.db.insert_open(*start_ts, snapshot)?);
+                    // Re-open the previous row if this is just a flicker away
+                    // from and back to the same window; otherwise start a new row.
+                    let id = match self
+                        .db
+                        .find_mergeable(*start_ts, snapshot, MERGE_GAP_SECS)?
+                    {
+                        Some(id) => id,
+                        None => self.db.insert_open(*start_ts, snapshot)?,
+                    };
+                    self.open_id = Some(id);
                 }
                 Effect::Extended { end_ts } => {
                     if let Some(id) = self.open_id {
@@ -281,6 +333,46 @@ mod tests {
             .map(|i| i.app_class)
             .collect();
         assert_eq!(classes, vec!["wezterm", "zen"]);
+    }
+
+    #[test]
+    fn flicker_away_and_back_merges_into_one_row() {
+        let r = run(&[
+            (1000, Some("zen")),
+            (1030, Some("zen")),
+            // Passes over another window for under a second, then back.
+            (1060, Some("steam")),
+            (1060, Some("zen")),
+            (1090, Some("zen")),
+        ]);
+        let rows = r.db().recent(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app_class, "zen");
+        assert_eq!(rows[0].duration_secs(), 90);
+    }
+
+    #[test]
+    fn a_real_gap_is_not_merged() {
+        let r = run(&[
+            (1000, Some("zen")),
+            (1060, None), // no window focused for 10 seconds
+            (1070, Some("zen")),
+            (1100, Some("zen")),
+        ]);
+        let rows = r.db().recent(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].duration_secs(), 30);
+        assert_eq!(rows[1].duration_secs(), 60);
+    }
+
+    #[test]
+    fn different_windows_are_never_merged() {
+        let r = run(&[
+            (1000, Some("zen")),
+            (1060, Some("wezterm")),
+            (1120, Some("wezterm")),
+        ]);
+        assert_eq!(r.db().recent(10).unwrap().len(), 2);
     }
 
     #[test]
