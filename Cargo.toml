@@ -4,9 +4,10 @@
 #   - timesink-core:   data model, title parsing, privacy rules, tracker, SQLite storage.
 #                      No Hyprland or UI code, so the TUI and sync can share it.
 #   - timesink-daemon: the background collector that talks to Hyprland.
+#   - timesink-tui:    the terminal interface (charts and summaries).
 [workspace]
 resolver = "2"
-members = ["crates/timesink-core", "crates/timesink-daemon"]
+members = ["crates/timesink-core", "crates/timesink-daemon", "crates/timesink-tui"]
 
 # Settings shared by every crate in the workspace.
 [workspace.package]

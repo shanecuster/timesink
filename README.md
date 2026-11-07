@@ -143,3 +143,26 @@ Playing media still counts you as present when you are away from the keyboard.
 
 This needs database layout version 2. The first start after upgrading copies
 your existing database to `timesink.db.bak-v1` before changing anything.
+
+## The terminal interface
+
+`timesink` (installed next to `timesink-daemon`) shows where your time went.
+It only reads the database, so it is safe to run while the daemon records.
+
+```
+cargo install --path crates/timesink-tui
+timesink
+```
+
+Three views: **Today** (category and application bars, active time by hour,
+a coloured timeline of the day and listening time), **7 days** and **30 days**
+(a day-by-hour heatmap plus the same category and application bars). Category
+colours follow the order of `apps.conf`, so they stay the same on every screen.
+
+| Key | Action |
+| --- | --- |
+| `←` `→`, `Tab`, `h` `l` | previous / next view |
+| `1` `2` `3` | Today / 7 days / 30 days |
+| `r` | refresh now (it also refreshes every 5 seconds) |
+| `?` | help |
+| `q`, `Esc` | quit |

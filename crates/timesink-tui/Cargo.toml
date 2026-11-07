@@ -1,0 +1,20 @@
+[package]
+name = "timesink-tui"
+version.workspace = true
+edition.workspace = true
+description = "Terminal interface for timesink: charts of where your time went"
+
+# The program is called `timesink`; the daemon is `timesink-daemon`.
+[[bin]]
+name = "timesink"
+path = "src/main.rs"
+
+[dependencies]
+# Shared model, database, app names and statistics.
+timesink-core = { path = "../timesink-core" }
+anyhow = "1"
+# ratatui draws the screens; crossterm reads the keyboard and controls the terminal.
+ratatui = "0.30"
+crossterm = "0.29"
+# chrono: local time zone and calendar dates.
+chrono = "0.4"
