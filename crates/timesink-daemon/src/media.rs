@@ -3,7 +3,9 @@
 //! Players such as Spotify, mpv and browsers publish a name starting with
 //! `org.mpris.MediaPlayer2.` on the session bus and expose a `PlaybackStatus`
 //! of `Playing`, `Paused` or `Stopped`. If any player is playing, you count as
-//! present even without touching the keyboard.
+//! present even without touching the keyboard, and the playing time is
+//! recorded as listening time. Only the player's name is used, never what it
+//! is playing.
 
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -14,6 +16,8 @@ use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::Connection;
 use zbus::zvariant::OwnedValue;
 
+use timesink_core::listen::player_id;
+
 use crate::service::Msg;
 
 /// How often the players are checked.
@@ -22,18 +26,30 @@ const POLL: Duration = Duration::from_secs(5);
 /// The well-known name prefix every MPRIS player uses.
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 
-/// Is any of these playback statuses "Playing"?
-pub fn any_playing<S: AsRef<str>>(statuses: impl IntoIterator<Item = S>) -> bool {
-    statuses.into_iter().any(|s| s.as_ref() == "Playing")
+/// From (D-Bus name, playback status) pairs, the sorted ids of the players
+/// whose status is exactly "Playing". Duplicates (two windows of one player)
+/// collapse into one id.
+pub fn playing_ids<N: AsRef<str>, S: AsRef<str>>(
+    players: impl IntoIterator<Item = (N, S)>,
+) -> Vec<String> {
+    let mut ids: Vec<String> = players
+        .into_iter()
+        .filter(|(_, status)| status.as_ref() == "Playing")
+        .map(|(name, _)| player_id(name.as_ref()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
-/// Ask every MPRIS player on the session bus whether it is playing.
-fn poll_once(conn: &Connection) -> Result<bool> {
+/// Ask every MPRIS player on the session bus whether it is playing, and
+/// return the ids of the ones that are.
+fn poll_once(conn: &Connection) -> Result<Vec<String>> {
     let names = DBusProxy::new(conn)?
         .list_names()
         .context("listing D-Bus names")?;
 
-    let mut statuses = Vec::new();
+    let mut players = Vec::new();
     for name in names {
         let name = name.as_str();
         if !name.starts_with(MPRIS_PREFIX) {
@@ -53,20 +69,20 @@ fn poll_once(conn: &Connection) -> Result<bool> {
             continue;
         };
         if let Ok(status) = String::try_from(value) {
-            statuses.push(status);
+            players.push((name.to_string(), status));
         }
     }
-    Ok(any_playing(statuses))
+    Ok(playing_ids(players))
 }
 
-/// Poll forever and report each CHANGE in "is anything playing".
+/// Poll forever and report each CHANGE in the set of playing players.
 fn watch(tx: &Sender<Msg>) -> Result<()> {
     let conn = Connection::session().context("connecting to the session D-Bus")?;
-    let mut last = false;
+    let mut last: Vec<String> = Vec::new();
     loop {
         let playing = poll_once(&conn)?;
         if playing != last {
-            last = playing;
+            last = playing.clone();
             if tx.send(Msg::Media(playing)).is_err() {
                 return Ok(()); // main thread is gone
             }
@@ -98,16 +114,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn playing_is_detected_among_players() {
-        assert!(any_playing(["Paused", "Playing"]));
-        assert!(any_playing(vec!["Playing".to_string()]));
+    fn playing_players_are_found_among_others() {
+        let ids = playing_ids([
+            ("org.mpris.MediaPlayer2.cider", "Playing"),
+            ("org.mpris.MediaPlayer2.mpv", "Paused"),
+            ("org.mpris.MediaPlayer2.firefox.instance99", "Playing"),
+        ]);
+        assert_eq!(ids, vec!["cider".to_string(), "firefox".to_string()]);
     }
 
     #[test]
     fn paused_stopped_or_no_players_is_not_playing() {
-        assert!(!any_playing(["Paused", "Stopped"]));
-        assert!(!any_playing(Vec::<String>::new()));
+        assert!(playing_ids([("org.mpris.MediaPlayer2.a", "Paused")]).is_empty());
+        assert!(playing_ids([("org.mpris.MediaPlayer2.a", "Stopped")]).is_empty());
+        assert!(playing_ids(Vec::<(String, String)>::new()).is_empty());
         // Case matters: MPRIS defines the exact string "Playing".
-        assert!(!any_playing(["playing"]));
+        assert!(playing_ids([("org.mpris.MediaPlayer2.a", "playing")]).is_empty());
+    }
+
+    #[test]
+    fn two_windows_of_one_player_count_once() {
+        let ids = playing_ids([
+            ("org.mpris.MediaPlayer2.firefox.instance1", "Playing"),
+            ("org.mpris.MediaPlayer2.firefox.instance2", "Playing"),
+        ]);
+        assert_eq!(ids, vec!["firefox".to_string()]);
     }
 }

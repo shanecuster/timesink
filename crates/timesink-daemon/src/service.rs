@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use timesink_core::db::{Db, Recorder};
+use timesink_core::listen::{ListenEffect, ListenTracker};
 use timesink_core::model::WindowSnapshot;
 use timesink_core::presence::{Presence, PresenceState};
 use timesink_core::sanitize::Sanitizer;
@@ -48,7 +49,8 @@ pub enum Msg {
     /// The session was unlocked.
     Unlock,
     /// Whether any media player is playing changed.
-    Media(bool),
+    /// Ids of the media players that are playing now (empty = none).
+    Media(Vec<String>),
 }
 
 /// Current time in whole seconds since the Unix epoch.
@@ -69,6 +71,10 @@ struct Service {
     last_presence: PresenceState,
     /// Set while Hyprland is reachable.
     hypr: Option<Hypr>,
+    /// Turns "who is playing" into listening rows.
+    listen: ListenTracker,
+    /// The players that were playing at the last report.
+    players: Vec<String>,
     verbose: bool,
 }
 
@@ -116,11 +122,16 @@ impl Service {
                 };
                 self.presence.sleep_started(since);
                 self.refresh_presence(now);
+                // Nothing is heard while asleep: end any listening row there.
+                let effects = self.listen.suspend(since);
+                self.apply_listen(&effects);
             }
             Msg::Wake => {
                 eprintln!("timesink: system woke up");
                 self.presence.sleep_ended();
                 self.refresh_presence(now);
+                self.listen.resume();
+                self.update_listening(now);
                 self.sample(now);
             }
             Msg::Lock => {
@@ -136,13 +147,12 @@ impl Service {
             }
             Msg::Media(playing) => {
                 if self.verbose {
-                    eprintln!(
-                        "timesink: media {}",
-                        if playing { "playing" } else { "stopped" }
-                    );
+                    eprintln!("timesink: media playing: {:?}", playing);
                 }
-                self.presence.media_changed(now, playing);
+                self.players = playing;
+                self.presence.media_changed(now, !self.players.is_empty());
                 self.refresh_presence(now);
+                self.update_listening(now);
                 // Media can end an idle period, so there may be a window to time.
                 self.sample(now);
             }
@@ -154,6 +164,7 @@ impl Service {
         let now = now_ts();
         self.presence.heartbeat(now);
         self.refresh_presence(now);
+        self.update_listening(now);
         self.sample(now);
     }
 
@@ -215,6 +226,19 @@ impl Service {
     }
 
     /// Store tracker effects; a database error is logged, not fatal.
+    /// Tell the listening tracker who is playing now and store the result.
+    fn update_listening(&mut self, now: i64) {
+        let effects = self.listen.observe(now, &self.players);
+        self.apply_listen(&effects);
+    }
+
+    /// Store listening changes; a failure is reported but never stops the daemon.
+    fn apply_listen(&mut self, effects: &[ListenEffect]) {
+        if let Err(e) = self.recorder.apply_listen(effects) {
+            eprintln!("timesink: could not write listening time: {e:#}");
+        }
+    }
+
     fn apply(&mut self, effects: &[Effect]) {
         if let Err(e) = self.recorder.apply(effects) {
             eprintln!("timesink: could not write to the database: {e:#}");
@@ -293,6 +317,8 @@ pub fn run(verbose: bool) -> Result<()> {
         presence: Presence::new(),
         last_presence: PresenceState::Active,
         hypr: None,
+        listen: ListenTracker::new(),
+        players: Vec::new(),
         verbose,
     };
 

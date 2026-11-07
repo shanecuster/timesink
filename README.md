@@ -129,3 +129,17 @@ Names are applied only when shown, so you can change the file at any time and
 all of your history is re-sorted. `timesink-daemon apps` lists every app seen
 so far and marks the ones still missing from the file; `timesink-daemon report`
 shows totals by category and by application.
+
+## Listening time
+
+While any media player is playing (anything that speaks MPRIS: Cider, mpv,
+browsers and so on), timesink also records *listening time*. It is kept apart
+from window focus, because music does not change which window you are using,
+so `report` lists it separately and never adds it to the totals above it.
+
+Only the player's short name is stored (for example `cider`), never track,
+artist or video titles. If the machine sleeps, listening stops at that moment.
+Playing media still counts you as present when you are away from the keyboard.
+
+This needs database layout version 2. The first start after upgrading copies
+your existing database to `timesink.db.bak-v1` before changing anything.

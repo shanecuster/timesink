@@ -142,6 +142,19 @@ fn report() -> Result<()> {
         );
     }
 
+    // Listening overlaps with focus time, so it is listed apart from the totals above.
+    let listening = db.listening_since(now - 24 * 3600)?;
+    println!("\nLast 24 hours, listening (not included above):");
+    if listening.is_empty() {
+        println!("  none");
+    } else {
+        let total: i64 = listening.iter().map(|(_, secs)| secs).sum();
+        println!("  {:>9}  total", format_duration(total));
+        for (player, secs) in &listening {
+            println!("  {:>9}  {}", format_duration(*secs), player);
+        }
+    }
+
     println!("\nMost recent intervals:");
     for i in db.recent(15)? {
         let title = if i.title.is_empty() { "-" } else { &i.title };
