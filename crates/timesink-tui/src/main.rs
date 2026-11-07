@@ -17,6 +17,7 @@ use timesink_core::db::Db;
 use timesink_core::paths;
 
 use crate::data::{Snapshot, View};
+use crate::export::Format;
 use crate::ui::{App, SortMode};
 
 /// How often the screen refreshes by itself.
@@ -96,6 +97,8 @@ fn run_interface(db: Db, map: AppMap) -> Result<()> {
         snapshot,
         category_names: map.categories(),
         sort: SortMode::Time,
+        export_menu: false,
+        notice: None,
         show_help: false,
         status: None,
     };
@@ -127,6 +130,25 @@ fn run(
                     continue;
                 }
                 let view = app.snapshot.view;
+                // Any key clears the last notice (for example "Wrote ...").
+                app.notice = None;
+
+                // While the export menu is open, the next key picks a format.
+                if app.export_menu {
+                    app.export_menu = false;
+                    let format = match key.code {
+                        KeyCode::Char('c') => Some(Format::Csv),
+                        KeyCode::Char('j') => Some(Format::Json),
+                        KeyCode::Char('m') => Some(Format::Markdown),
+                        KeyCode::Char('h') => Some(Format::Html),
+                        _ => None, // Esc or anything else cancels
+                    };
+                    if let Some(format) = format {
+                        app.notice = Some(export_view(db, map, format, view));
+                    }
+                    continue;
+                }
+
                 let new_view = match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -139,6 +161,10 @@ fn run(
                     KeyCode::Char('3') => Some(View::Month),
                     KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
+                        None
+                    }
+                    KeyCode::Char('e') => {
+                        app.export_menu = true;
                         None
                     }
                     KeyCode::Char('s') => {
@@ -160,6 +186,20 @@ fn run(
             reload(app, db, map, view);
             last_refresh = Instant::now();
         }
+    }
+}
+
+/// Write the report for the period on screen and describe what happened.
+fn export_view(db: &Db, map: &AppMap, format: Format, view: View) -> String {
+    let request = commands::ExportRequest {
+        format,
+        days: view.days(),
+        out: None,
+        force: false,
+    };
+    match commands::run_export(db, map, &request, now_ts(), &local_offset) {
+        Ok(path) => format!(" Wrote {}", path.display()),
+        Err(e) => format!(" Export failed: {e:#}"),
     }
 }
 

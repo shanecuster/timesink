@@ -167,6 +167,34 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
 | `1` `2` `3` | Today / 7 days / 30 days |
 | `s` | sort the lists by time or by name |
+| `e` | export the view you are looking at (then `c` csv, `j` json, `m` markdown, `h` html, `Esc` cancel) |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
 | `q`, `Esc` | quit |
+
+## Exports and backups
+
+```
+timesink export                          # a week as an HTML page
+timesink export -f csv -p month          # a month of every recorded row
+timesink export -f json --days 90        # the last 90 days
+timesink export -f md -p today -o notes/ # into a folder
+timesink backup                          # a dated copy of the database
+```
+
+- **Formats:** `csv` and `json` include every recorded row (focus and
+  listening, with start, end, seconds, app, category, raw class and the cleaned
+  detail). `md` and `html` are summaries: categories, applications, days and
+  listening. The HTML page is one self-contained file with no scripts.
+- **Periods:** `-p today|week|month`, or `--days N` (1 to 3650).
+- **Where:** `~/Documents/timesink-exports`, or `-o PATH`. A path with a file
+  extension is a file; anything else is a folder (created if needed).
+- **Nothing is overwritten.** A second export on the same day becomes
+  `...-2.csv`, `...-3.csv`. An explicit file that already exists needs `--force`.
+- **Privacy:** exports contain only what the database holds: app names,
+  categories and the cleaned detail (program names, `ssh: label`), never page,
+  channel or note titles. Spreadsheet formula characters at the start of a CSV
+  field are defused with a leading apostrophe.
+- **Backups:** `timesink backup` writes a consistent copy with SQLite's
+  `VACUUM INTO`, which is safe while the daemon is recording. To restore, stop
+  the service and copy the backup over `~/.local/share/timesink/timesink.db`.

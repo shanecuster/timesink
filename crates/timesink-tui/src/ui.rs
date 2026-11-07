@@ -19,6 +19,11 @@ pub struct App {
     pub category_names: Vec<String>,
     /// How the lists are ordered.
     pub sort: SortMode,
+    /// Is the export menu (choose a format) open?
+    pub export_menu: bool,
+    /// A short message about something that just happened (an export); it is
+    /// shown in place of the key hints until the next key press.
+    pub notice: Option<String>,
     /// Is the help overlay open?
     pub show_help: bool,
     /// A short message for the bottom line (e.g. a refresh error).
@@ -448,11 +453,16 @@ fn heat_color(secs: i64, busiest: i64) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The key hints, or a status message if there is one.
+/// The footer line: the export menu, an error, a notice, or the key hints.
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let text = match &app.status {
-        Some(msg) => msg.clone(),
-        None => " ←/→ or 1-3 switch view · s sort · r refresh · ? help · q quit".to_string(),
+    let text = if app.export_menu {
+        " Export this view as:  c csv · j json · m markdown · h html · Esc cancel".to_string()
+    } else if let Some(msg) = &app.status {
+        msg.clone()
+    } else if let Some(msg) = &app.notice {
+        msg.clone()
+    } else {
+        " ←/→ or 1-3 switch view · s sort · e export · r refresh · ? help · q quit".to_string()
     };
     frame.render_widget(
         Paragraph::new(Line::styled(text, Style::default().fg(MUTED))),
@@ -463,7 +473,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect) {
     let w = 56.min(area.width);
-    let h = 11.min(area.height);
+    let h = 12.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -474,6 +484,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(" ←/→, Tab, h/l   next / previous view"),
         Line::from(" 1  2  3         Today / 7 days / 30 days"),
         Line::from(" s               sort by time / by name"),
+        Line::from(" e               export this view (csv, json, md, html)"),
         Line::from(" r               refresh now"),
         Line::from(" ?               close this help"),
         Line::from(" q, Esc          quit"),
@@ -574,6 +585,8 @@ mod tests {
             snapshot: Snapshot::build(&spans, &music, &map, view, now, &utc),
             category_names: map.categories(),
             sort: SortMode::Time,
+            export_menu: false,
+            notice: None,
             show_help: false,
             status: None,
         }
@@ -675,6 +688,8 @@ mod tests {
             snapshot: Snapshot::build(&[], &[], &map, View::Week, 50 * 86400, &utc),
             category_names: vec![],
             sort: SortMode::Time,
+            export_menu: false,
+            notice: None,
             show_help: false,
             status: None,
         };
@@ -797,8 +812,30 @@ mod tests {
     }
 
     #[test]
-    fn footer_mentions_the_sort_key() {
-        assert!(render(&sample_app(View::Today), 100, 30).contains("s sort"));
+    fn footer_mentions_the_sort_and_export_keys() {
+        let screen = render(&sample_app(View::Today), 100, 30);
+        assert!(screen.contains("s sort"));
+        assert!(screen.contains("e export"));
+    }
+
+    #[test]
+    fn export_menu_and_notice_replace_the_hints() {
+        let mut app = sample_app(View::Today);
+        app.export_menu = true;
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("c csv"), "{screen}");
+        assert!(screen.contains("h html"));
+        assert!(!screen.contains("s sort"));
+
+        app.export_menu = false;
+        app.notice = Some(" Wrote /tmp/report.html".into());
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Wrote /tmp/report.html"));
+        // An error still wins over a notice.
+        app.status = Some(" could not read the database".into());
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("could not read"));
+        assert!(!screen.contains("Wrote /tmp"));
     }
 
     #[test]
