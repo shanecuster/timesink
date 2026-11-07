@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use timesink_core::appmap::AppMap;
 use timesink_core::db::Db;
+use timesink_core::demo;
+use timesink_core::model::WindowSnapshot;
 use timesink_core::paths;
 use timesink_core::stats;
 
@@ -193,6 +195,59 @@ pub fn run_backup(
     Ok(path)
 }
 
+/// Demo data may only be written when the sandbox script has set `TIMESINK_SANDBOX=1`.
+/// This is the guard that keeps made-up rows out of the real database: the real service and
+/// a normal shell never set it.
+fn check_sandbox(marker: Option<&str>) -> Result<()> {
+    if marker == Some("1") {
+        Ok(())
+    } else {
+        bail!(
+            "demo-data only runs inside the sandbox (it writes made-up data). \
+             Start it with: sh contrib/sandbox.sh"
+        )
+    }
+}
+
+/// Fill an empty sandbox database with `days` days of made-up data. Returns a one-line summary.
+pub fn run_demo(days: i64, seed: u64, now: i64, tz: &dyn Fn(i64) -> i64) -> Result<String> {
+    check_sandbox(std::env::var("TIMESINK_SANDBOX").ok().as_deref())?;
+    let path = paths::db_path()?;
+    let db = Db::open(&path, &paths::device_id())?;
+    // Never pile demo data on top of existing rows (a second run would double everything).
+    if !db.intervals_between(0, now + 1)?.is_empty() {
+        bail!(
+            "the sandbox database already has data; reset it first (sh contrib/sandbox.sh reset)"
+        );
+    }
+    let data = demo::generate(now, days, seed, tz(now));
+    for i in &data.intervals {
+        let id = db.insert_open(
+            i.start,
+            &WindowSnapshot {
+                app_class: i.class.clone(),
+                title: i.detail.clone(),
+                workspace: "1".to_string(),
+            },
+        )?;
+        db.finish(id, i.end)?;
+    }
+    for (player, start, end) in &data.listening {
+        let id = db.insert_listen_open(*start, player)?;
+        db.finish_listen(id, *end)?;
+    }
+    for (site, start, end) in &data.sites {
+        db.insert_domain_stretch(site, *start, *end)?;
+    }
+    Ok(format!(
+        "made {} focus rows, {} listening rows and {} site rows over {days} days in {}",
+        data.intervals.len(),
+        data.listening.len(),
+        data.sites.len(),
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +390,13 @@ mod tests {
             db.listening_since(0).unwrap()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn demo_data_is_refused_without_the_sandbox_marker() {
+        assert!(check_sandbox(None).is_err());
+        assert!(check_sandbox(Some("0")).is_err());
+        assert!(check_sandbox(Some("")).is_err());
+        assert!(check_sandbox(Some("1")).is_ok());
     }
 }

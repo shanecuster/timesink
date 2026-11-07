@@ -58,6 +58,14 @@ fn start() -> Result<()> {
         return Ok(());
     }
 
+    // The sandbox command creates its own database, so it runs before the "is there a
+    // database?" check below.
+    if let cli::Command::DemoData { days, seed } = command {
+        let summary = commands::run_demo(days, seed, now_ts(), &local_offset)?;
+        println!("{summary}");
+        return Ok(());
+    }
+
     let path = paths::db_path()?;
     if !path.exists() {
         anyhow::bail!(
@@ -90,6 +98,8 @@ fn start() -> Result<()> {
             println!("Backup written to {}", file.display());
             Ok(())
         }
+        // Handled before the database was opened; listed so the match stays complete.
+        cli::Command::DemoData { .. } => Ok(()),
         cli::Command::Tui | cli::Command::Help => run_interface(db, map),
     }
 }

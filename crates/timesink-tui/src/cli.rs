@@ -31,6 +31,13 @@ pub enum Command {
         /// Where to write; the default folder is used when absent.
         out: Option<PathBuf>,
     },
+    /// Fill an empty sandbox database with made-up data (refused outside the sandbox).
+    DemoData {
+        /// How many days to make, ending today.
+        days: i64,
+        /// Seed for the repeatable random numbers.
+        seed: u64,
+    },
     /// Show the usage text.
     Help,
 }
@@ -51,6 +58,10 @@ EXPORT OPTIONS
   -o, --out PATH        a file (name with an extension) or a folder
       --force           replace an existing file
 
+SANDBOX
+  timesink demo-data [--days N] [--seed N]   fill an empty sandbox database with
+                                              made-up data (see contrib/sandbox.fish)
+
 Files go to ~/Documents/timesink-exports unless --out is given.
 CSV and JSON include every recorded row; md and html are summaries.
 ";
@@ -65,6 +76,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-h" | "--help" | "help" => Ok(Command::Help),
         "export" => parse_export(&args[1..]),
         "backup" => parse_backup(&args[1..]),
+        "demo-data" => parse_demo(&args[1..]),
         other => Err(format!("unknown command '{other}' (try: timesink --help)")),
     }
 }
@@ -129,6 +141,35 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
         out,
         force,
     })
+}
+
+/// Parse the arguments after `demo-data`: `[--days N] [--seed N]`.
+fn parse_demo(args: &[String]) -> Result<Command, String> {
+    let (mut days, mut seed) = (35, 1);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--days" => {
+                let text = value(args, i, "--days")?;
+                days = text
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| (1..=400).contains(n))
+                    .ok_or_else(|| format!("--days needs a number from 1 to 400, not '{text}'"))?;
+                i += 1;
+            }
+            "--seed" => {
+                let text = value(args, i, "--seed")?;
+                seed = text
+                    .parse::<u64>()
+                    .map_err(|_| format!("--seed needs a whole number, not '{text}'"))?;
+                i += 1;
+            }
+            other => return Err(format!("unknown option '{other}' (try: timesink --help)")),
+        }
+        i += 1;
+    }
+    Ok(Command::DemoData { days, seed })
 }
 
 /// Parse the arguments after `backup`.
@@ -247,5 +288,22 @@ mod tests {
         assert!(parse(&args("frobnicate"))
             .unwrap_err()
             .contains("unknown command"));
+    }
+
+    #[test]
+    fn demo_data_options() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse(&a(&["demo-data"])),
+            Ok(Command::DemoData { days: 35, seed: 1 })
+        );
+        assert_eq!(
+            parse(&a(&["demo-data", "--days", "10", "--seed", "9"])),
+            Ok(Command::DemoData { days: 10, seed: 9 })
+        );
+        assert!(parse(&a(&["demo-data", "--days", "0"])).is_err());
+        assert!(parse(&a(&["demo-data", "--days", "9999"])).is_err());
+        assert!(parse(&a(&["demo-data", "--seed", "x"])).is_err());
+        assert!(parse(&a(&["demo-data", "--nope"])).is_err());
     }
 }

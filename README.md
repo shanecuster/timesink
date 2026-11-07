@@ -255,6 +255,25 @@ removes the registration. This part was tested end to end against the helper and
 with a simulated browser; check it in your own Zen before relying on it, since the
 exact add-on loading steps can differ between Zen versions.
 
+## Sandbox (try things on made-up data)
+
+To test the interface, themes, exports or screenshots without touching your real
+data, use the sandbox:
+
+```
+sh contrib/sandbox.sh          # opens timesink on 35 days of made-up data
+sh contrib/sandbox.sh shell    # a shell inside the sandbox (try `timesink export`)
+sh contrib/sandbox.sh reset    # throw it away; a fresh one is made next time
+```
+
+(From fish, run the same lines; the script is plain `sh`.) The sandbox is one
+folder (`~/.cache/timesink-sandbox`, or `$TIMESINK_SANDBOX_DIR`) with its own
+database, settings, theme choice, `apps.conf` and `domains.conf` copied from the
+examples, and its own export folder. The real daemon is never involved and your
+real files are not read or written. `timesink demo-data` itself refuses to run
+unless the script has set its marker, so it cannot fill your real database.
+The days always end today, so reset to refresh them.
+
 ## Exports and backups
 
 ```

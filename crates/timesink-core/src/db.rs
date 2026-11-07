@@ -417,6 +417,17 @@ impl Db {
         Ok(())
     }
 
+    /// Store a complete site stretch in one go (used only to fill the sandbox with demo data;
+    /// real reports go through [`Db::record_domain`]).
+    pub fn insert_domain_stretch(&self, site: &str, start_ts: i64, end_ts: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO domains (device_id, start_ts, end_ts, domain, closed)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            params![self.device_id, start_ts, end_ts, site],
+        )?;
+        Ok(())
+    }
+
     /// All site stretches that overlap `[from_ts, to_ts)` as (site, start, end), oldest first.
     pub fn domains_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
