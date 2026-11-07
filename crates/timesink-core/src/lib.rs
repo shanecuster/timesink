@@ -9,6 +9,7 @@
 pub mod appmap;
 pub mod config;
 pub mod db;
+pub mod listen;
 pub mod model;
 pub mod presence;
 pub mod sanitize;
