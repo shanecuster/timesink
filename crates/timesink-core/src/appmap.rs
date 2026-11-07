@@ -54,6 +54,8 @@ pub struct AppMap {
     /// Prefix entries (`something*`), as (lower-cased prefix, entry).
     /// Kept in file order; the longest matching prefix wins.
     prefixes: Vec<(String, Entry)>,
+    /// Categories in the order they first appear in the file ("Other" excluded).
+    category_order: Vec<String>,
 }
 
 impl AppMap {
@@ -75,6 +77,9 @@ impl AppMap {
             let category = parts.collect::<Vec<_>>().join(" ");
             if category.is_empty() {
                 continue;
+            }
+            if category != OTHER && !map.category_order.contains(&category) {
+                map.category_order.push(category.clone());
             }
             let entry = Entry {
                 display: display.to_string(),
@@ -118,22 +123,23 @@ impl AppMap {
         }
     }
 
-    /// Every category named in the config, sorted and without duplicates.
-    /// "Other" is not included; it exists only for apps that are not listed.
+    /// Every category named in the config, in the order each first appears in
+    /// the file. "Other" is not included; it exists only for apps that are not
+    /// listed. A category whose lines were all replaced by later lines is left out.
     ///
-    /// Useful for giving each category a fixed colour that does not change
-    /// between screens.
+    /// Used to give each category a fixed colour that does not change between
+    /// screens. Because the order is the file's order, you choose which
+    /// categories get the most distinct colours by putting them first.
     pub fn categories(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .exact
-            .values()
-            .map(|e| e.category.clone())
-            .chain(self.prefixes.iter().map(|(_, e)| e.category.clone()))
-            .filter(|c| c != OTHER)
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+        let in_use = |name: &String| {
+            self.exact.values().any(|e| &e.category == name)
+                || self.prefixes.iter().any(|(_, e)| &e.category == name)
+        };
+        self.category_order
+            .iter()
+            .filter(|name| in_use(name))
+            .cloned()
+            .collect()
     }
 
     /// Turn a parsed entry into the public answer.
@@ -308,11 +314,17 @@ mod tests {
     }
 
     #[test]
-    fn categories_are_sorted_and_unique() {
+    fn categories_follow_file_order_without_duplicates() {
         assert_eq!(
             sample().categories(),
-            vec!["Browser", "Chat", "Deep Work", "Files", "Terminal"]
+            vec!["Terminal", "Browser", "Chat", "Files", "Deep Work"]
         );
         assert!(AppMap::default().categories().is_empty());
+    }
+
+    #[test]
+    fn a_fully_replaced_category_is_dropped_from_the_list() {
+        let map = AppMap::from_conf("zen zen Browser\nzen zen Research\nvim vim Editors\n");
+        assert_eq!(map.categories(), vec!["Research", "Editors"]);
     }
 }
