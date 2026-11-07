@@ -25,26 +25,6 @@ pub struct App {
     pub status: Option<String>,
 }
 
-/// Colours given out to categories, in the order they appear in `apps.conf`.
-/// They are spread around the colour wheel so neighbours are easy to tell apart.
-const PALETTE: [Color; 12] = [
-    Color::Rgb(86, 156, 214),  // blue
-    Color::Rgb(230, 145, 80),  // orange
-    Color::Rgb(140, 200, 100), // green
-    Color::Rgb(181, 137, 214), // purple
-    Color::Rgb(229, 192, 70),  // yellow
-    Color::Rgb(64, 200, 180),  // teal
-    Color::Rgb(224, 95, 105),  // red
-    Color::Rgb(235, 130, 190), // pink
-    Color::Rgb(120, 120, 230), // indigo
-    Color::Rgb(190, 150, 110), // tan
-    Color::Rgb(170, 70, 120),  // plum
-    Color::Rgb(150, 165, 80),  // olive
-];
-
-/// Colour for "Other" and anything unknown.
-const OTHER_COLOR: Color = Color::Rgb(128, 128, 128);
-
 /// Readable but quiet: key hints, axis labels and help text.
 const MUTED: Color = Color::Rgb(170, 175, 190);
 
@@ -78,25 +58,9 @@ impl SortMode {
 impl App {
     /// The colour of a category: fixed by its place in the config.
     pub fn color_of(&self, category: &str) -> Color {
-        match self.category_names.iter().position(|c| c == category) {
-            Some(i) => {
-                let Color::Rgb(r, g, b) = PALETTE[i % PALETTE.len()] else {
-                    return OTHER_COLOR;
-                };
-                // Past the end of the palette, reuse the colours but darker,
-                // so a repeat is never identical to its first use.
-                if i >= PALETTE.len() {
-                    Color::Rgb(
-                        (r as u16 * 65 / 100) as u8,
-                        (g as u16 * 65 / 100) as u8,
-                        (b as u16 * 65 / 100) as u8,
-                    )
-                } else {
-                    Color::Rgb(r, g, b)
-                }
-            }
-            None => OTHER_COLOR,
-        }
+        let index = self.category_names.iter().position(|c| c == category);
+        let (r, g, b) = crate::palette::rgb_for(index);
+        Color::Rgb(r, g, b)
     }
 }
 
@@ -562,6 +526,9 @@ mod tests {
     use ratatui::Terminal;
     use timesink_core::appmap::AppMap;
     use timesink_core::stats::Span as TimeSpan;
+
+    /// The grey used for "Other" and unknown categories.
+    const OTHER_COLOR: Color = Color::Rgb(128, 128, 128);
 
     /// UTC for the tests.
     fn utc(_: i64) -> i64 {

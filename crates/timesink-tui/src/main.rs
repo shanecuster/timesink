@@ -1,6 +1,7 @@
 //! `timesink`: the terminal interface. Reads the database the daemon writes.
 
 mod data;
+mod palette;
 mod ui;
 
 use std::time::{Duration, Instant};

@@ -143,7 +143,8 @@ impl Snapshot {
         Ok(Snapshot::build(&spans, &listening, map, view, now, tz))
     }
 
-    /// Work out every number from the spans. No database or clock involved.
+    /// Work out every number from the spans for the period of `view`.
+    /// No database or clock involved.
     pub fn build(
         spans: &[Span],
         listening: &[Span],
@@ -152,8 +153,22 @@ impl Snapshot {
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Snapshot {
+        Snapshot::build_days(spans, listening, map, view, view.days(), now, tz)
+    }
+
+    /// Like `build`, but for any number of days ending today (used by exports).
+    /// `view` only decides whether the day timeline is filled in.
+    pub fn build_days(
+        spans: &[Span],
+        listening: &[Span],
+        map: &AppMap,
+        view: View,
+        days: i64,
+        now: i64,
+        tz: &dyn Fn(i64) -> i64,
+    ) -> Snapshot {
         let today = stats::local_day(now, tz);
-        let first = today - (view.days() - 1);
+        let first = today - (days.max(1) - 1);
 
         // Per-day raw app totals, the hour grid and the listening per day.
         let per_day = stats::per_day(spans, first, today, tz);
@@ -306,6 +321,18 @@ mod tests {
         assert_eq!(snap.listening_total, 660);
         assert_eq!(snap.listening[0], ("cider".to_string(), 600));
         assert_eq!(snap.days[0].listening, 660);
+    }
+
+    #[test]
+    fn any_number_of_days_can_be_built() {
+        let now = 50 * 86400 + 100;
+        let old = [span(40 * 86400, 40 * 86400 + 500, "zen")];
+        // 10 days back is 11 days ago at most: inside 14 days, outside 7.
+        let snap = Snapshot::build_days(&old, &[], &map(), View::Month, 14, now, &utc);
+        assert_eq!(snap.days.len(), 14);
+        assert_eq!(snap.total, 500);
+        let snap = Snapshot::build_days(&old, &[], &map(), View::Month, 7, now, &utc);
+        assert_eq!(snap.total, 0);
     }
 
     #[test]
