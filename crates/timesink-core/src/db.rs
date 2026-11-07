@@ -109,9 +109,17 @@ impl Db {
         Ok(())
     }
 
-    /// Finish an interval. Very short ones are deleted instead of kept.
+    /// Finish an interval at exactly `end_ts` (never before its start).
+    ///
+    /// Unlike `set_end` this CAN move the end backwards. That is needed when
+    /// idle is noticed late: heartbeats have already pushed the end forward, and
+    /// it must be pulled back to the time of the last input.
+    /// Very short intervals are deleted instead of kept.
     pub fn finish(&self, id: i64, end_ts: i64) -> Result<()> {
-        self.set_end(id, end_ts)?;
+        self.conn.execute(
+            "UPDATE intervals SET end_ts = MAX(start_ts, ?2) WHERE id = ?1",
+            params![id, end_ts],
+        )?;
         self.conn.execute(
             "DELETE FROM intervals WHERE id = ?1 AND end_ts - start_ts < ?2",
             params![id, MIN_INTERVAL_SECS],
@@ -287,6 +295,26 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let total: i64 = rows.iter().map(|i| i.duration_secs()).sum();
         assert_eq!(total, 30 + 30);
+    }
+
+    #[test]
+    fn going_away_pulls_the_end_back_to_the_last_input() {
+        use crate::presence::PresenceState;
+        let mut recorder = Recorder::new(Db::open_in_memory("testbox").unwrap());
+        let mut tracker = Tracker::new();
+        // Heartbeats keep extending the interval up to 1060...
+        for now in [1000, 1030, 1060] {
+            recorder
+                .apply(&tracker.observe(now, Some(snap("zen"))))
+                .unwrap();
+        }
+        // ...but idle is only noticed at 1100, and the last input was at 1040.
+        recorder
+            .apply(&tracker.set_presence(1100, PresenceState::Away { since: 1040 }))
+            .unwrap();
+        let rows = recorder.db().recent(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_secs(), 40);
     }
 
     #[test]

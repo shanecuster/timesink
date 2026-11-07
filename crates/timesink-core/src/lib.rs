@@ -8,6 +8,7 @@
 
 pub mod db;
 pub mod model;
+pub mod presence;
 pub mod sanitize;
 pub mod title;
 pub mod tracker;
