@@ -21,3 +21,4 @@ io.github.lgse.Strata*      strata       Files
 org.gnome.Nautilus          nautilus     Files
 jetbrains-studio            android-studio  Development
 bitwarden                   bitwarden    Passwords
+com.gabm.satty           satty        Utilities

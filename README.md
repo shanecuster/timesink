@@ -167,12 +167,21 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
 | `1` `2` `3` | Today / 7 days / 30 days |
 | `s` | sort the lists by time or by name |
+| `a` | rename an app or move it to another category (or a new one); saved to `apps.conf` |
 | `t` | next colour theme |
 | `b` | show / hide the title banner |
 | `e` | export the view you are looking at (then `c` csv, `j` json, `m` markdown, `h` html, `Esc` cancel) |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
 | `q`, `Esc` | quit |
+
+### Editing names and categories from the interface
+
+`a` opens a small editor: pick an application, confirm or change its short name,
+then pick a category or type a new one. The choice is appended as a line to your
+`apps.conf` (a later line replaces an earlier one, so your hand-written file, its
+comments and its order are never rewritten) and the screen updates at once. A new
+category goes to the end of the file, so it takes the next free bar colour.
 
 ### Title banner and themes
 

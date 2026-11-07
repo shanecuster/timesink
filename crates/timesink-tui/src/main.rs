@@ -1,5 +1,6 @@
 //! `timesink`: the terminal interface. Reads the database the daemon writes.
 
+mod assign;
 mod banner;
 mod cli;
 mod commands;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::{Local, Offset, TimeZone};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use timesink_core::appmap::AppMap;
+use timesink_core::appmap::{self, AppMap};
 use timesink_core::db::Db;
 use timesink_core::paths;
 use timesink_core::settings::Settings;
@@ -94,7 +95,7 @@ fn start() -> Result<()> {
 }
 
 /// Open the interactive screens and run them until the user quits.
-fn run_interface(db: Db, map: AppMap) -> Result<()> {
+fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
     let snapshot = Snapshot::load(&db, &map, View::Today, now_ts(), &local_offset)?;
     // Remembered choices (theme, sort order, banner). A broken settings file is not worth
     // refusing to start over, so fall back to the defaults.
@@ -111,6 +112,7 @@ fn run_interface(db: Db, map: AppMap) -> Result<()> {
         },
         theme: *theme::find_or_default(&settings.theme),
         banner: settings.banner,
+        assign: assign::Assign::Closed,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -119,7 +121,7 @@ fn run_interface(db: Db, map: AppMap) -> Result<()> {
 
     // Restores the terminal even if drawing panics.
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut app, &db, &map);
+    let result = run(&mut terminal, &mut app, &db, &mut map);
     ratatui::restore();
     result
 }
@@ -129,7 +131,7 @@ fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     db: &Db,
-    map: &AppMap,
+    map: &mut AppMap,
 ) -> Result<()> {
     let mut last_refresh = Instant::now();
     loop {
@@ -146,6 +148,19 @@ fn run(
                 let view = app.snapshot.view;
                 // Any key clears the last notice (for example "Wrote ...").
                 app.notice = None;
+
+                // While the app editor is open it gets every key (so typing "q" in a name
+                // does not quit).
+                if app.assign != assign::Assign::Closed {
+                    if let Some(write) =
+                        assign::handle_key(&mut app.assign, key, &app.category_names)
+                    {
+                        app.notice = Some(apply_assignment(app, map, &write));
+                        reload(app, db, map, view);
+                        last_refresh = Instant::now();
+                    }
+                    continue;
+                }
 
                 // While the export menu is open, the next key picks a format.
                 if app.export_menu {
@@ -187,6 +202,10 @@ fn run(
                         save_settings(app);
                         None
                     }
+                    KeyCode::Char('a') => {
+                        app.assign = assign::open(app.ordered_apps());
+                        None
+                    }
                     KeyCode::Char('t') => {
                         // Next theme in the list; the colours change on the next draw.
                         app.theme = *theme::next(&app.theme);
@@ -213,6 +232,25 @@ fn run(
             reload(app, db, map, view);
             last_refresh = Instant::now();
         }
+    }
+}
+
+/// Save an edit from the app editor to `apps.conf`, re-read the file and describe what
+/// happened. One line is appended for each raw class the row stands for.
+fn apply_assignment(app: &mut App, map: &mut AppMap, write: &assign::Write) -> String {
+    let result = paths::apps_conf_path().and_then(|path| {
+        for raw in &write.raws {
+            appmap::append_entry(&path, raw, &write.display, &write.category)?;
+        }
+        paths::load_app_map()
+    });
+    match result {
+        Ok(new_map) => {
+            *map = new_map;
+            app.category_names = map.categories();
+            format!(" {} is now in {}", write.display, write.category)
+        }
+        Err(e) => format!(" could not update apps.conf: {e:#}"),
     }
 }
 

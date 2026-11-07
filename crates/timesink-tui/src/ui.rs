@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use timesink_core::theme::{Rgb, Theme};
 
+use crate::assign::{self, Assign};
 use crate::banner;
 use crate::data::{DayRow, Snapshot, View};
 
@@ -35,6 +36,8 @@ pub struct App {
     pub theme: Theme,
     /// Is the title banner (name, date, day sparkline) shown?
     pub banner: bool,
+    /// The application name / category editor (the `a` key).
+    pub assign: Assign,
 }
 
 /// A theme colour as a terminal colour.
@@ -70,6 +73,15 @@ impl SortMode {
 }
 
 impl App {
+    /// The applications in the order the Applications panel shows them.
+    pub fn ordered_apps(&self) -> Vec<timesink_core::appmap::AppTotal> {
+        let mut apps = self.snapshot.apps.clone();
+        if self.sort == SortMode::Name {
+            apps.sort_by_key(|a| a.display.to_lowercase());
+        }
+        apps
+    }
+
     /// A bordered box in the theme's border colour with a title in the text colour.
     fn block<'a>(&self, title: impl Into<Line<'a>>) -> Block<'a> {
         Block::default()
@@ -126,6 +138,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_footer(frame, footer, app);
     if app.show_help {
         draw_help(frame, area, app);
+    }
+    if app.assign != Assign::Closed {
+        draw_assign(frame, area, app);
     }
 }
 
@@ -238,10 +253,9 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     // Order the lists. The snapshot is already by time; by name is A to Z,
     // ignoring case, with "Other" kept last.
     let mut categories = snap.categories.clone();
-    let mut apps = snap.apps.clone();
+    let apps = app.ordered_apps();
     if app.sort == SortMode::Name {
         categories.sort_by_key(|(name, _)| (name == "Other", name.to_lowercase()));
-        apps.sort_by_key(|a| a.display.to_lowercase());
     }
 
     // Bars are scaled against the biggest value, wherever it is in the list.
@@ -542,7 +556,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.notice {
         msg.clone()
     } else {
-        " ←/→ or 1-3 view · s sort · t theme · b banner · e export · r refresh · ? help · q quit"
+        " ←/→ view · s sort · a apps · t theme · b banner · e export · r refresh · ? help · q quit"
             .to_string()
     };
     frame.render_widget(Paragraph::new(Line::styled(text, app.muted())), area);
@@ -551,7 +565,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let w = 56.min(area.width);
-    let h = 14.min(area.height);
+    let h = 15.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -562,6 +576,7 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(" ←/→, Tab, h/l   next / previous view"),
         Line::from(" 1  2  3         Today / 7 days / 30 days"),
         Line::from(" s               sort by time / by name"),
+        Line::from(" a               rename an app / change its category"),
         Line::from(" t               next colour theme"),
         Line::from(" b               show / hide the title banner"),
         Line::from(" e               export this view (csv, json, md, html)"),
@@ -574,6 +589,97 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     ];
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(Paragraph::new(text).block(app.block(" Help ")), rect);
+}
+
+/// The editor popup for application names and categories.
+fn draw_assign(frame: &mut Frame, area: Rect, app: &App) {
+    let w = 54.min(area.width);
+    let h = 16.min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    let accent = Style::default()
+        .fg(tc(app.theme.accent))
+        .add_modifier(Modifier::BOLD);
+    // How many list rows fit inside the box (borders and the hint line excluded).
+    let room = h.saturating_sub(3).max(1) as usize;
+    // A window of `room` rows around the highlighted one.
+    let window = |len: usize, sel: usize| -> (usize, usize) {
+        let start = sel.saturating_sub(room - 1).min(len.saturating_sub(room));
+        (start, (start + room).min(len))
+    };
+    let (title, lines): (String, Vec<Line>) = match &app.assign {
+        Assign::Closed => return,
+        Assign::PickApp { list, sel } => {
+            let (a, b) = window(list.len(), *sel);
+            let mut lines: Vec<Line> = list[a..b]
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let row = format!(" {:<26} {}", truncate(&t.display, 26), t.category);
+                    if a + i == *sel {
+                        Line::styled(row, accent)
+                    } else {
+                        Line::from(row)
+                    }
+                })
+                .collect();
+            lines.push(Line::styled(
+                " ↑/↓ choose · Enter select · Esc cancel",
+                app.muted(),
+            ));
+            (" Edit which app? ".to_string(), lines)
+        }
+        Assign::Name { target, text } => (
+            format!(" Short name for {} ", truncate(&target.display, 24)),
+            vec![
+                Line::from(""),
+                Line::styled(format!(" {text}▏"), accent),
+                Line::from(""),
+                Line::styled(" Enter keep / confirm · Esc cancel", app.muted()),
+            ],
+        ),
+        Assign::PickCategory { name, sel, .. } => {
+            let rows = assign::category_rows(&app.category_names);
+            let (a, b) = window(rows.len(), *sel);
+            let mut lines: Vec<Line> = rows[a..b]
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    if a + i == *sel {
+                        Line::styled(format!(" ▸ {r}"), accent)
+                    } else {
+                        Line::from(format!("   {r}"))
+                    }
+                })
+                .collect();
+            lines.push(Line::styled(
+                " ↑/↓ choose · Enter select · Esc cancel",
+                app.muted(),
+            ));
+            (format!(" Category for {} ", truncate(name, 24)), lines)
+        }
+        Assign::NewCategory { text, .. } => (
+            " New category ".to_string(),
+            vec![
+                Line::from(""),
+                Line::styled(format!(" {text}▏"), accent),
+                Line::from(""),
+                Line::styled(" Enter confirm · Esc cancel", app.muted()),
+            ],
+        ),
+    };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    // The popup gets the theme background explicitly: Clear resets the cells it covers.
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(tc(app.theme.bg)).fg(tc(app.theme.fg)))
+            .block(app.block(title)),
+        rect,
+    );
 }
 
 /// `1h 05m`, `4m 07s` or `12s`.
@@ -659,6 +765,7 @@ mod tests {
             status: None,
             theme: timesink_core::theme::THEMES[0],
             banner: true,
+            assign: Assign::Closed,
         }
     }
 
@@ -764,6 +871,7 @@ mod tests {
             status: None,
             theme: timesink_core::theme::THEMES[0],
             banner: true,
+            assign: Assign::Closed,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));
@@ -835,6 +943,36 @@ mod tests {
 
         // Too short a terminal hides it automatically.
         assert!(!render(&app, 120, 20).contains("t i m e s i n k"));
+    }
+
+    #[test]
+    fn the_app_editor_popup_shows_each_step() {
+        let mut app = sample_app(View::Today);
+        app.assign = crate::assign::open(app.ordered_apps());
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Edit which app?"), "{screen}");
+        assert!(screen.contains("mystery.App"), "{screen}");
+
+        let key = |c| crossterm::event::KeyEvent::new(c, crossterm::event::KeyModifiers::NONE);
+        let known = app.category_names.clone();
+        crate::assign::handle_key(
+            &mut app.assign,
+            key(crossterm::event::KeyCode::Enter),
+            &known,
+        );
+        assert!(render(&app, 100, 30).contains("Short name for"));
+        crate::assign::handle_key(
+            &mut app.assign,
+            key(crossterm::event::KeyCode::Enter),
+            &known,
+        );
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Category for"), "{screen}");
+        assert!(screen.contains("+ new category"), "{screen}");
+        // And it survives tiny terminals.
+        for (w, h) in [(1, 1), (30, 6), (60, 10)] {
+            let _ = render(&app, w, h);
+        }
     }
 
     #[test]

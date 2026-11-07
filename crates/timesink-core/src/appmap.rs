@@ -161,6 +161,9 @@ pub struct AppTotal {
     pub category: String,
     /// Seconds spent.
     pub secs: i64,
+    /// The raw classes merged into this row (what `apps.conf` lines are keyed by).
+    /// Used when an app is renamed or moved to another category.
+    pub raws: Vec<String>,
 }
 
 impl AppMap {
@@ -176,11 +179,15 @@ impl AppMap {
         for (raw, secs) in totals {
             let info = self.lookup(raw);
             match apps.iter_mut().find(|a| a.display == info.display) {
-                Some(app) => app.secs += secs,
+                Some(app) => {
+                    app.secs += secs;
+                    app.raws.push(raw.clone());
+                }
                 None => apps.push(AppTotal {
                     display: info.display,
                     category: info.category.clone(),
                     secs: *secs,
+                    raws: vec![raw.clone()],
                 }),
             }
             match categories.iter_mut().find(|(c, _)| *c == info.category) {
@@ -193,6 +200,71 @@ impl AppMap {
         categories.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         (apps, categories)
     }
+}
+
+/// Make a value safe to write as one `apps.conf` field: no line breaks, and (for fields that
+/// must be a single word) spaces turned into dashes. Returns `None` if nothing is left.
+fn clean_field(value: &str, single_word: bool) -> Option<String> {
+    let flat: String = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    let out = if single_word {
+        flat.split_whitespace().collect::<Vec<_>>().join("-")
+    } else {
+        flat.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    (!out.is_empty()).then_some(out)
+}
+
+/// The `apps.conf` line that gives `raw` the display name and category. `None` if any part
+/// is empty once cleaned. A `#` at the start of the raw class is refused, since the line
+/// would be read back as a comment.
+pub fn entry_line(raw: &str, display: &str, category: &str) -> Option<String> {
+    let raw = clean_field(raw, true)?;
+    if raw.starts_with('#') {
+        return None;
+    }
+    Some(format!(
+        "{} {} {}",
+        raw,
+        clean_field(display, true)?,
+        clean_field(category, false)?
+    ))
+}
+
+/// Add an entry to the end of the `apps.conf` at `path`, creating the file if needed.
+///
+/// Because a later line replaces an earlier one for the same class, appending is all it
+/// takes to change an app: the file you wrote by hand (comments, ordering) is never rewritten.
+pub fn append_entry(
+    path: &std::path::Path,
+    raw: &str,
+    display: &str,
+    category: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::io::Write;
+    let line = entry_line(raw, display, category)
+        .context("the app name and category must not be empty")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    // If the file does not end with a newline, add one first so the entry has its own line.
+    let needs_break = std::fs::read(path)
+        .map(|b| !b.is_empty() && !b.ends_with(b"\n"))
+        .unwrap_or(false);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if needs_break {
+        file.write_all(b"\n")?;
+    }
+    writeln!(file, "{line}").with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -326,5 +398,54 @@ mod tests {
     fn a_fully_replaced_category_is_dropped_from_the_list() {
         let map = AppMap::from_conf("zen zen Browser\nzen zen Research\nvim vim Editors\n");
         assert_eq!(map.categories(), vec!["Research", "Editors"]);
+    }
+
+    #[test]
+    fn entry_line_cleans_fields() {
+        assert_eq!(
+            entry_line("com.gabm.satty", "satty", "Utilities").as_deref(),
+            Some("com.gabm.satty satty Utilities")
+        );
+        // A display name with spaces becomes one word; a category keeps its spaces.
+        assert_eq!(
+            entry_line("x", "Android Studio", "  Deep   Work\n").as_deref(),
+            Some("x Android-Studio Deep Work")
+        );
+        assert_eq!(entry_line("x", "", "Cat"), None);
+        assert_eq!(entry_line("x", "y", "   "), None);
+        assert_eq!(entry_line("#x", "y", "Cat"), None);
+    }
+
+    #[test]
+    fn appended_entries_override_and_keep_the_hand_written_file() {
+        let dir = std::env::temp_dir().join(format!("timesink-appmap-{}", std::process::id()));
+        let path = dir.join("apps.conf");
+        // No trailing newline on purpose: the append must still start a new line.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "# my notes\nzen zen Browser").unwrap();
+        append_entry(&path, "com.gabm.satty", "satty", "Utilities").unwrap();
+        append_entry(&path, "zen", "zen", "Research").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# my notes\nzen zen Browser\n"));
+        let map = AppMap::from_conf(&text);
+        let satty = map.lookup("com.gabm.satty");
+        assert_eq!(
+            (satty.display.as_str(), satty.category.as_str()),
+            ("satty", "Utilities")
+        );
+        // The later line wins for zen.
+        assert_eq!(map.lookup("zen").category, "Research");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn grouped_rows_remember_their_raw_classes() {
+        let map = sample();
+        let totals = vec![
+            ("io.github.lgse.Strata".to_string(), 30),
+            ("io.github.lgse.Strata.FileChooser".to_string(), 5),
+        ];
+        let (apps, _) = map.group(&totals);
+        assert_eq!(apps[0].raws.len(), 2);
     }
 }

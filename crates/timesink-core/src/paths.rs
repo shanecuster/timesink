@@ -79,3 +79,8 @@ pub fn load_app_map() -> Result<AppMap> {
 pub fn tui_settings_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("tui.conf"))
 }
+
+/// Where `apps.conf` lives (also where the interface appends entries).
+pub fn apps_conf_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("apps.conf"))
+}
