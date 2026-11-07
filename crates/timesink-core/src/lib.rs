@@ -13,5 +13,6 @@ pub mod listen;
 pub mod model;
 pub mod presence;
 pub mod sanitize;
+pub mod stats;
 pub mod title;
 pub mod tracker;
