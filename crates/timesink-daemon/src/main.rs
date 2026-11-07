@@ -10,6 +10,7 @@
 //!   TIMESINK_DEVICE  device name stored with every row (default: /etc/hostname)
 
 mod hyprland;
+mod idle;
 mod paths;
 mod service;
 

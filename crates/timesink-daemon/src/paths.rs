@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use timesink_core::config::Config;
 use timesink_core::sanitize::Sanitizer;
 
 /// Folder for data files: `$XDG_DATA_HOME/timesink` or `~/.local/share/timesink`.
@@ -63,5 +64,12 @@ fn read_config_file(name: &str) -> Result<Option<String>> {
 pub fn load_sanitizer() -> Result<Sanitizer> {
     Ok(read_config_file("hosts.conf")?
         .map(|text| Sanitizer::from_hosts_conf(&text))
+        .unwrap_or_default())
+}
+
+/// Load `config.conf` (idle timeout etc.), falling back to the defaults.
+pub fn load_config() -> Result<Config> {
+    Ok(read_config_file("config.conf")?
+        .map(|text| Config::from_conf(&text))
         .unwrap_or_default())
 }

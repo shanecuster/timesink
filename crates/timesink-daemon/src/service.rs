@@ -21,7 +21,7 @@ use timesink_core::sanitize::Sanitizer;
 use timesink_core::tracker::{Effect, Tracker};
 
 use crate::hyprland::{is_relevant_event, Hypr, Next};
-use crate::paths;
+use crate::{idle, paths};
 
 /// How often the open interval is refreshed when no events arrive.
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -35,6 +35,10 @@ pub enum Msg {
     Disconnected,
     /// One raw Hyprland event line, e.g. `activewindowv2>>abc`.
     FocusEvent(String),
+    /// The compositor reports no input since this Unix time.
+    Idle { since: i64 },
+    /// Input is happening (also sent when idle detection first connects).
+    Active,
 }
 
 /// Current time in whole seconds since the Unix epoch.
@@ -78,6 +82,16 @@ impl Service {
                 if is_relevant_event(&line) {
                     self.sample(now);
                 }
+            }
+            Msg::Idle { since } => {
+                self.presence.idle_started(since);
+                self.refresh_presence(now);
+            }
+            Msg::Active => {
+                self.presence.idle_ended();
+                self.refresh_presence(now);
+                // Back at the keyboard: start timing the focused window again.
+                self.sample(now);
             }
         }
     }
@@ -211,6 +225,7 @@ fn spawn_hyprland_watcher(tx: Sender<Msg>) {
 /// Run the collector. Only returns if the database cannot be opened.
 pub fn run(verbose: bool) -> Result<()> {
     let sanitizer = paths::load_sanitizer()?;
+    let config = paths::load_config()?;
     let path = paths::db_path()?;
     let recorder = Recorder::new(Db::open(&path, &paths::device_id())?);
     eprintln!("timesink: recording to {}", path.display());
@@ -228,6 +243,11 @@ pub fn run(verbose: bool) -> Result<()> {
     // All watcher threads send into this one channel.
     let (tx, rx) = mpsc::channel::<Msg>();
     spawn_hyprland_watcher(tx.clone());
+    eprintln!(
+        "timesink: idle after {} minutes without input",
+        config.idle_timeout_secs / 60
+    );
+    idle::spawn(tx.clone(), config.idle_timeout_secs);
 
     loop {
         match rx.recv_timeout(HEARTBEAT) {
