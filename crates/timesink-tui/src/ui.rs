@@ -17,35 +17,84 @@ pub struct App {
     pub snapshot: Snapshot,
     /// Categories named in the config, for stable colours.
     pub category_names: Vec<String>,
+    /// How the lists are ordered.
+    pub sort: SortMode,
     /// Is the help overlay open?
     pub show_help: bool,
     /// A short message for the bottom line (e.g. a refresh error).
     pub status: Option<String>,
 }
 
-/// Colours given out to categories in alphabetical order.
-const PALETTE: [Color; 8] = [
+/// Colours given out to categories, in the order they appear in `apps.conf`.
+/// They are spread around the colour wheel so neighbours are easy to tell apart.
+const PALETTE: [Color; 12] = [
     Color::Rgb(86, 156, 214),  // blue
-    Color::Rgb(78, 201, 176),  // teal
-    Color::Rgb(220, 220, 120), // yellow
-    Color::Rgb(206, 145, 120), // orange
+    Color::Rgb(230, 145, 80),  // orange
+    Color::Rgb(140, 200, 100), // green
     Color::Rgb(181, 137, 214), // purple
-    Color::Rgb(152, 195, 121), // green
-    Color::Rgb(224, 108, 117), // red
-    Color::Rgb(97, 175, 239),  // light blue
+    Color::Rgb(229, 192, 70),  // yellow
+    Color::Rgb(64, 200, 180),  // teal
+    Color::Rgb(224, 95, 105),  // red
+    Color::Rgb(235, 130, 190), // pink
+    Color::Rgb(120, 120, 230), // indigo
+    Color::Rgb(190, 150, 110), // tan
+    Color::Rgb(170, 70, 120),  // plum
+    Color::Rgb(150, 165, 80),  // olive
 ];
 
 /// Colour for "Other" and anything unknown.
 const OTHER_COLOR: Color = Color::Rgb(128, 128, 128);
 
-/// A dim colour for empty space and labels.
-const DIM: Color = Color::Rgb(90, 90, 90);
+/// Readable but quiet: key hints, axis labels and help text.
+const MUTED: Color = Color::Rgb(170, 175, 190);
+
+/// How the Categories and Applications lists are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    /// Most time first.
+    Time,
+    /// A to Z (with "Other" last).
+    Name,
+}
+
+impl SortMode {
+    /// The other mode.
+    pub fn toggle(self) -> SortMode {
+        match self {
+            SortMode::Time => SortMode::Name,
+            SortMode::Name => SortMode::Time,
+        }
+    }
+
+    /// Word shown in the panel titles.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Time => "by time",
+            SortMode::Name => "by name",
+        }
+    }
+}
 
 impl App {
     /// The colour of a category: fixed by its place in the config.
     pub fn color_of(&self, category: &str) -> Color {
         match self.category_names.iter().position(|c| c == category) {
-            Some(i) => PALETTE[i % PALETTE.len()],
+            Some(i) => {
+                let Color::Rgb(r, g, b) = PALETTE[i % PALETTE.len()] else {
+                    return OTHER_COLOR;
+                };
+                // Past the end of the palette, reuse the colours but darker,
+                // so a repeat is never identical to its first use.
+                if i >= PALETTE.len() {
+                    Color::Rgb(
+                        (r as u16 * 65 / 100) as u8,
+                        (g as u16 * 65 / 100) as u8,
+                        (b as u16 * 65 / 100) as u8,
+                    )
+                } else {
+                    Color::Rgb(r, g, b)
+                }
+            }
             None => OTHER_COLOR,
         }
     }
@@ -119,7 +168,7 @@ fn draw_range(frame: &mut Frame, area: Rect, app: &App) {
     draw_summary(frame, right, app);
 }
 
-/// Category bars above application bars.
+/// Category bars above application bars, in the chosen order.
 fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snapshot;
     let [cat_area, app_area] = Layout::vertical([
@@ -128,30 +177,42 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .areas(area);
 
-    // Bars are scaled against the biggest category.
-    let max = snap.categories.first().map(|c| c.1).unwrap_or(1).max(1);
+    // Order the lists. The snapshot is already by time; by name is A to Z,
+    // ignoring case, with "Other" kept last.
+    let mut categories = snap.categories.clone();
+    let mut apps = snap.apps.clone();
+    if app.sort == SortMode::Name {
+        categories.sort_by_key(|(name, _)| (name == "Other", name.to_lowercase()));
+        apps.sort_by_key(|a| a.display.to_lowercase());
+    }
+
+    // Bars are scaled against the biggest value, wherever it is in the list.
+    let max = categories.iter().map(|c| c.1).max().unwrap_or(1).max(1);
     let inner_w = cat_area.width.saturating_sub(2) as usize;
-    let lines: Vec<Line> = if snap.categories.is_empty() {
+    let lines: Vec<Line> = if categories.is_empty() {
         vec![Line::styled(
             "  nothing recorded yet",
-            Style::default().fg(DIM),
+            Style::default().fg(MUTED),
         )]
     } else {
-        snap.categories
+        categories
             .iter()
             .map(|(name, secs)| bar_line(name, *secs, max, inner_w, app.color_of(name), 12))
             .collect()
     };
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Categories ")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Categories · {} ", app.sort.label())),
+        ),
         cat_area,
     );
 
-    let max = snap.apps.first().map(|a| a.secs).unwrap_or(1).max(1);
+    let max = apps.iter().map(|a| a.secs).max().unwrap_or(1).max(1);
     let inner_w = app_area.width.saturating_sub(2) as usize;
     let rows = app_area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = snap
-        .apps
+    let lines: Vec<Line> = apps
         .iter()
         .take(rows)
         .map(|a| {
@@ -169,7 +230,7 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Applications "),
+                .title(format!(" Applications · {} ", app.sort.label())),
         ),
         app_area,
     );
@@ -239,7 +300,7 @@ fn draw_hourly(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             " ".repeat(bar_w)
         };
-        labels.push(Span::styled(text, Style::default().fg(DIM)));
+        labels.push(Span::styled(text, Style::default().fg(MUTED)));
     }
     lines.push(Line::from(labels));
     frame.render_widget(
@@ -298,7 +359,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
     let tick_line: String = ticks.into_iter().collect();
     let lines = vec![
         Line::from(cells),
-        Line::styled(tick_line, Style::default().fg(DIM)),
+        Line::styled(tick_line, Style::default().fg(MUTED)),
     ];
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Timeline ")),
@@ -360,7 +421,7 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     for h in (0..24).step_by(3) {
         header.push(Span::styled(
             format!("{:<w$}", h, w = cell_w * 3),
-            Style::default().fg(DIM),
+            Style::default().fg(MUTED),
         ));
     }
     let mut lines = vec![Line::from(header)];
@@ -427,10 +488,10 @@ fn heat_color(secs: i64, busiest: i64) -> Color {
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = match &app.status {
         Some(msg) => msg.clone(),
-        None => " ←/→ or 1-3 switch view · r refresh · ? help · q quit".to_string(),
+        None => " ←/→ or 1-3 switch view · s sort · r refresh · ? help · q quit".to_string(),
     };
     frame.render_widget(
-        Paragraph::new(Line::styled(text, Style::default().fg(DIM))),
+        Paragraph::new(Line::styled(text, Style::default().fg(MUTED))),
         area,
     );
 }
@@ -438,7 +499,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect) {
     let w = 56.min(area.width);
-    let h = 10.min(area.height);
+    let h = 11.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -448,17 +509,18 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     let text = vec![
         Line::from(" ←/→, Tab, h/l   next / previous view"),
         Line::from(" 1  2  3         Today / 7 days / 30 days"),
+        Line::from(" s               sort by time / by name"),
         Line::from(" r               refresh now"),
         Line::from(" ?               close this help"),
         Line::from(" q, Esc          quit"),
         Line::from(""),
         Line::styled(
             " Listening time overlaps focus time, so it is",
-            Style::default().fg(DIM),
+            Style::default().fg(MUTED),
         ),
         Line::styled(
             " shown beside the totals, not inside.",
-            Style::default().fg(DIM),
+            Style::default().fg(MUTED),
         ),
     ];
     frame.render_widget(ratatui::widgets::Clear, rect);
@@ -544,6 +606,7 @@ mod tests {
         App {
             snapshot: Snapshot::build(&spans, &music, &map, view, now, &utc),
             category_names: map.categories(),
+            sort: SortMode::Time,
             show_help: false,
             status: None,
         }
@@ -644,6 +707,7 @@ mod tests {
         let app = App {
             snapshot: Snapshot::build(&[], &[], &map, View::Week, 50 * 86400, &utc),
             category_names: vec![],
+            sort: SortMode::Time,
             show_help: false,
             status: None,
         };
@@ -681,6 +745,93 @@ mod tests {
         assert_ne!(browser, app.color_of("Terminal"));
         assert_eq!(app.color_of("Other"), OTHER_COLOR);
         assert_eq!(app.color_of("Never Heard Of It"), OTHER_COLOR);
+    }
+
+    #[test]
+    fn the_first_twelve_categories_all_get_different_colours() {
+        let mut app = sample_app(View::Today);
+        app.category_names = (0..14).map(|i| format!("cat{i}")).collect();
+        let colours: Vec<Color> = (0..12).map(|i| app.color_of(&format!("cat{i}"))).collect();
+        for (i, a) in colours.iter().enumerate() {
+            for b in &colours[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // Past the palette the colours repeat, but darker, never identical.
+        assert_ne!(app.color_of("cat12"), app.color_of("cat0"));
+        assert_ne!(app.color_of("cat13"), app.color_of("cat1"));
+    }
+
+    #[test]
+    fn nine_categories_like_the_real_config_are_all_distinct() {
+        let mut app = sample_app(View::Today);
+        app.category_names = [
+            "Terminal",
+            "Browser",
+            "Email",
+            "Notes",
+            "Chat",
+            "Music",
+            "Files",
+            "Development",
+            "Passwords",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // The two biggest are the ones that must never look alike.
+        assert_ne!(app.color_of("Terminal"), app.color_of("Browser"));
+        let all: Vec<Color> = app.category_names.iter().map(|c| app.color_of(c)).collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// Row number of the first screen line that contains `text`.
+    fn row_of(screen: &str, text: &str) -> usize {
+        screen
+            .lines()
+            .position(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("{text:?} not on screen:\n{screen}"))
+    }
+
+    #[test]
+    fn lists_sort_by_time_or_by_name() {
+        let mut app = sample_app(View::Today);
+
+        // By time: Terminal (1h 15m) is above Browser (1h), "Other" is smallest.
+        let screen = render(&app, 110, 32);
+        assert!(screen.contains("Categories · by time"));
+        assert!(row_of(&screen, "│ Terminal") < row_of(&screen, "│ Browser"));
+
+        // By name: A to Z, with "Other" kept last.
+        app.sort = SortMode::Name;
+        let screen = render(&app, 110, 32);
+        assert!(screen.contains("Categories · by name"));
+        assert!(screen.contains("Applications · by name"));
+        let (b, c, t, o) = (
+            row_of(&screen, "│ Browser"),
+            row_of(&screen, "│ Chat"),
+            row_of(&screen, "│ Terminal"),
+            row_of(&screen, "│ Other"),
+        );
+        assert!(b < c && c < t && t < o, "{screen}");
+        // Applications are A to Z too: discord, mystery.App, wezterm, zen.
+        assert!(row_of(&screen, "│ discord") < row_of(&screen, "│ wezterm"));
+        assert!(row_of(&screen, "│ wezterm") < row_of(&screen, "│ zen"));
+    }
+
+    #[test]
+    fn sort_mode_toggles_back_and_forth() {
+        assert_eq!(SortMode::Time.toggle(), SortMode::Name);
+        assert_eq!(SortMode::Name.toggle(), SortMode::Time);
+    }
+
+    #[test]
+    fn footer_mentions_the_sort_key() {
+        assert!(render(&sample_app(View::Today), 100, 30).contains("s sort"));
     }
 
     #[test]

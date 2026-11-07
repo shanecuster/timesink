@@ -157,12 +157,16 @@ timesink
 Three views: **Today** (category and application bars, active time by hour,
 a coloured timeline of the day and listening time), **7 days** and **30 days**
 (a day-by-hour heatmap plus the same category and application bars). Category
-colours follow the order of `apps.conf`, so they stay the same on every screen.
+colours follow the order in which categories first appear in `apps.conf`
+(12 distinct colours; later ones repeat darker), so they stay the same on every
+screen. Put your most-used categories first to keep them easy to tell apart.
+The Categories and Applications lists can be sorted by time or by name (`s`).
 
 | Key | Action |
 | --- | --- |
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
 | `1` `2` `3` | Today / 7 days / 30 days |
+| `s` | sort the lists by time or by name |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
 | `q`, `Esc` | quit |

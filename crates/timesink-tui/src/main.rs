@@ -13,7 +13,7 @@ use timesink_core::db::Db;
 use timesink_core::paths;
 
 use crate::data::{Snapshot, View};
-use crate::ui::App;
+use crate::ui::{App, SortMode};
 
 /// How often the screen refreshes by itself.
 const REFRESH: Duration = Duration::from_secs(5);
@@ -56,6 +56,7 @@ fn start() -> Result<()> {
     let mut app = App {
         snapshot,
         category_names: map.categories(),
+        sort: SortMode::Time,
         show_help: false,
         status: None,
     };
@@ -99,6 +100,11 @@ fn run(
                     KeyCode::Char('3') => Some(View::Month),
                     KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
+                        None
+                    }
+                    KeyCode::Char('s') => {
+                        // Only the order changes, so no need to re-read the database.
+                        app.sort = app.sort.toggle();
                         None
                     }
                     KeyCode::Char('r') => Some(view),
