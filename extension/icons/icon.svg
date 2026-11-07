@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- timesink icon: an hourglass on a dark rounded square (original artwork) -->
+  <rect width="48" height="48" rx="10" fill="#2d353b"/>
+  <!-- top and bottom caps -->
+  <rect x="12" y="9" width="24" height="4" rx="2" fill="#a7c080"/>
+  <rect x="12" y="35" width="24" height="4" rx="2" fill="#a7c080"/>
+  <!-- glass outline: two triangles meeting at the waist -->
+  <path d="M14 13 L34 13 L26 24 L34 35 L14 35 L22 24 Z" fill="none" stroke="#d3c6aa" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- sand: upper pile and lower pile -->
+  <path d="M19 16 L29 16 L24 22 Z" fill="#dbbc7f"/>
+  <path d="M17 33 L31 33 L24 27 Z" fill="#dbbc7f"/>
+</svg>

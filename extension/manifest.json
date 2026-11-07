@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "timesink sites",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tells your local timesink which website (domain only) is in the active tab. Nothing leaves your computer.",
   "browser_specific_settings": {
     "gecko": {
@@ -10,6 +10,7 @@
       "data_collection_permissions": { "required": ["none"] }
     }
   },
+  "icons": { "48": "icons/icon.svg", "96": "icons/icon.svg" },
   "permissions": ["tabs", "nativeMessaging"],
   "incognito": "not_allowed",
   "background": { "scripts": ["background.js"] }
