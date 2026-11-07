@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
+use crate::listen::ListenEffect;
 use crate::model::{StoredInterval, WindowSnapshot};
 use crate::tracker::Effect;
 
 /// Version of the database layout. Bump it and add a migration step when the
 /// layout changes. Stored in SQLite's built-in `user_version` field.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Intervals shorter than this many seconds are deleted when they close.
 /// This drops the flicker from quickly passing over windows.
@@ -23,6 +24,11 @@ pub const MIN_INTERVAL_SECS: i64 = 1;
 /// A new interval that starts within this many seconds of the previous one
 /// ending, with the exact same window, is joined to it instead of being a new row.
 pub const MERGE_GAP_SECS: i64 = 2;
+
+/// A listening row that starts within this many seconds of the same player's
+/// previous row ending is joined to it. Players pause briefly between tracks,
+/// and the player list is only checked every few seconds.
+pub const LISTEN_MERGE_GAP_SECS: i64 = 10;
 
 /// A handle to the timesink database.
 pub struct Db {
@@ -79,6 +85,20 @@ impl Db {
                      workspace TEXT    NOT NULL
                  );
                  CREATE INDEX idx_intervals_start ON intervals(start_ts);",
+            )?;
+        }
+        if version < 2 {
+            // Version 2 adds listening time (which media player was playing).
+            // Only the player's short id is stored, never track information.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS listening (
+                     id        INTEGER PRIMARY KEY,
+                     device_id TEXT    NOT NULL,
+                     start_ts  INTEGER NOT NULL,
+                     end_ts    INTEGER NOT NULL,
+                     player    TEXT    NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_listening_start ON listening(start_ts);",
             )?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -203,6 +223,80 @@ impl Db {
         let rows = stmt.query_map([since_ts], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("reading totals")
+    }
+}
+
+impl Db {
+    /// Insert a new listening row that has just started. Returns its id.
+    pub fn insert_listen_open(&self, start_ts: i64, player: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO listening (device_id, start_ts, end_ts, player)
+             VALUES (?1, ?2, ?2, ?3)",
+            params![self.device_id, start_ts, player],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Move an open listening row's end forward (never backwards).
+    pub fn set_listen_end(&self, id: i64, end_ts: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE listening SET end_ts = MAX(end_ts, ?2) WHERE id = ?1",
+            params![id, end_ts],
+        )?;
+        Ok(())
+    }
+
+    /// Finish a listening row at exactly `end_ts`; very short rows are deleted.
+    pub fn finish_listen(&self, id: i64, end_ts: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE listening SET end_ts = MAX(start_ts, ?2) WHERE id = ?1",
+            params![id, end_ts],
+        )?;
+        self.conn.execute(
+            "DELETE FROM listening WHERE id = ?1 AND end_ts - start_ts < ?2",
+            params![id, MIN_INTERVAL_SECS],
+        )?;
+        Ok(())
+    }
+
+    /// Find the latest listening row of this device if it is the same player
+    /// and ended no more than `max_gap` seconds before `start_ts`.
+    pub fn find_listen_mergeable(
+        &self,
+        start_ts: i64,
+        player: &str,
+        max_gap: i64,
+    ) -> Result<Option<i64>> {
+        let latest = self.conn.query_row(
+            "SELECT id, end_ts, player FROM listening
+             WHERE device_id = ?1 ORDER BY end_ts DESC, id DESC LIMIT 1",
+            [&self.device_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        );
+        match latest {
+            Ok((id, end_ts, p)) if p == player && start_ts - end_ts <= max_gap => Ok(Some(id)),
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context("looking for a listening row to join"),
+        }
+    }
+
+    /// Seconds of listening per player since `since_ts`, most first.
+    /// Time before `since_ts` is not counted.
+    pub fn listening_since(&self, since_ts: i64) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT player, SUM(end_ts - MAX(start_ts, ?1)) AS secs
+             FROM listening WHERE end_ts > ?1
+             GROUP BY player ORDER BY secs DESC",
+        )?;
+        let rows = stmt.query_map([since_ts], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading listening totals")
     }
 }
 
@@ -336,17 +430,54 @@ pub struct Recorder {
     db: Db,
     /// Row id of the interval currently open, if any.
     open_id: Option<i64>,
+    /// Row id of the listening row currently open, if any.
+    open_listen_id: Option<i64>,
 }
 
 impl Recorder {
     /// Wrap a database.
     pub fn new(db: Db) -> Self {
-        Self { db, open_id: None }
+        Self {
+            db,
+            open_id: None,
+            open_listen_id: None,
+        }
     }
 
     /// Read access to the database (for reports).
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// Apply a batch of listening effects in order.
+    pub fn apply_listen(&mut self, effects: &[ListenEffect]) -> Result<()> {
+        for effect in effects {
+            match effect {
+                ListenEffect::Opened { start_ts, player } => {
+                    // Re-open the same player's previous row after a short pause.
+                    let id = match self.db.find_listen_mergeable(
+                        *start_ts,
+                        player,
+                        LISTEN_MERGE_GAP_SECS,
+                    )? {
+                        Some(id) => id,
+                        None => self.db.insert_listen_open(*start_ts, player)?,
+                    };
+                    self.open_listen_id = Some(id);
+                }
+                ListenEffect::Extended { end_ts } => {
+                    if let Some(id) = self.open_listen_id {
+                        self.db.set_listen_end(id, *end_ts)?;
+                    }
+                }
+                ListenEffect::Closed { end_ts } => {
+                    if let Some(id) = self.open_listen_id.take() {
+                        self.db.finish_listen(id, *end_ts)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Apply a batch of effects in order.
@@ -709,5 +840,111 @@ mod merge_regression {
                 after[app]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod listening_tests {
+    use super::*;
+
+    /// Shorthand for a list of effects building one listening session.
+    fn open(start: i64, player: &str) -> ListenEffect {
+        ListenEffect::Opened {
+            start_ts: start,
+            player: player.into(),
+        }
+    }
+
+    #[test]
+    fn records_and_totals_listening() {
+        let mut r = Recorder::new(Db::open_in_memory("box").unwrap());
+        r.apply_listen(&[open(1000, "cider")]).unwrap();
+        r.apply_listen(&[ListenEffect::Extended { end_ts: 1030 }])
+            .unwrap();
+        r.apply_listen(&[ListenEffect::Closed { end_ts: 1100 }])
+            .unwrap();
+        r.apply_listen(&[open(2000, "mpv"), ListenEffect::Closed { end_ts: 2040 }])
+            .unwrap();
+        let totals = r.db().listening_since(0).unwrap();
+        assert_eq!(totals, vec![("cider".into(), 100), ("mpv".into(), 40)]);
+    }
+
+    #[test]
+    fn totals_only_count_time_inside_the_window() {
+        let mut r = Recorder::new(Db::open_in_memory("box").unwrap());
+        r.apply_listen(&[open(1000, "cider"), ListenEffect::Closed { end_ts: 1100 }])
+            .unwrap();
+        // Only the last 40 seconds of the row are after 1060.
+        assert_eq!(
+            r.db().listening_since(1060).unwrap(),
+            vec![("cider".into(), 40)]
+        );
+    }
+
+    #[test]
+    fn short_pause_between_tracks_joins_the_same_row() {
+        let mut r = Recorder::new(Db::open_in_memory("box").unwrap());
+        r.apply_listen(&[open(1000, "cider"), ListenEffect::Closed { end_ts: 1100 }])
+            .unwrap();
+        // Same player resumes 6 seconds later: one row, not two.
+        r.apply_listen(&[open(1106, "cider"), ListenEffect::Closed { end_ts: 1200 }])
+            .unwrap();
+        // A different player right after does not join.
+        r.apply_listen(&[open(1201, "mpv"), ListenEffect::Closed { end_ts: 1260 }])
+            .unwrap();
+        let rows: i64 = r
+            .db()
+            .conn
+            .query_row("SELECT COUNT(*) FROM listening", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            r.db().listening_since(0).unwrap(),
+            vec![("cider".into(), 200), ("mpv".into(), 59)]
+        );
+    }
+
+    #[test]
+    fn one_second_blips_are_dropped() {
+        let mut r = Recorder::new(Db::open_in_memory("box").unwrap());
+        r.apply_listen(&[open(1000, "cider"), ListenEffect::Closed { end_ts: 1000 }])
+            .unwrap();
+        assert!(r.db().listening_since(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upgrading_a_v1_database_backs_it_up_and_keeps_the_data() {
+        let dir = std::env::temp_dir().join(format!("timesink-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+
+        // Build a version 1 database by hand, as the older program did.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE intervals (
+                     id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
+                     app_class TEXT NOT NULL, title TEXT NOT NULL,
+                     workspace TEXT NOT NULL);
+                 INSERT INTO intervals VALUES (1,'box',100,160,'zen','','1');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        let db = Db::open(&path, "box").unwrap();
+        // The old data is untouched and the new table exists and is empty.
+        assert_eq!(db.totals_since(0).unwrap(), vec![("zen".into(), 60)]);
+        assert!(db.listening_since(0).unwrap().is_empty());
+        // A backup of the version 1 file was written first.
+        assert!(dir.join("t.db.bak-v1").exists());
+        assert_eq!(
+            read_user_version(&Connection::open(&path).unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
