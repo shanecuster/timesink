@@ -206,6 +206,131 @@ impl Db {
     }
 }
 
+impl Db {
+    /// Write a consistent copy of the whole database to `path`.
+    ///
+    /// Uses SQLite's `VACUUM INTO`, which is safe even while the daemon is
+    /// writing (a plain file copy could miss data still in the write-ahead log).
+    /// Fails if `path` already exists.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
+            .with_context(|| format!("backing up database to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Rewrite stored titles. `rewrite(app_class, title)` returns the new title.
+    ///
+    /// Returns how many rows changed. Runs in one transaction, so it either
+    /// applies completely or not at all.
+    pub fn rewrite_titles(&self, rewrite: impl Fn(&str, &str) -> String) -> Result<usize> {
+        // Each distinct (app, title) pair only needs to be rewritten once.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT app_class, title FROM intervals")?;
+        let pairs = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = 0;
+        for (app_class, title) in pairs {
+            let new_title = rewrite(&app_class, &title);
+            if new_title != title {
+                changed += tx.execute(
+                    "UPDATE intervals SET title = ?3 WHERE app_class = ?1 AND title = ?2",
+                    params![app_class, title, new_title],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Join neighbouring rows that are now the same window and at most
+    /// `max_gap` seconds apart (for example after titles were blanked).
+    ///
+    /// Returns how many rows were removed by merging. The newest row of each
+    /// device is never touched, because the running daemon may still be updating it.
+    pub fn merge_adjacent(&self, max_gap: i64) -> Result<usize> {
+        /// One row, with just the fields merging needs.
+        struct Row {
+            id: i64,
+            device: String,
+            start: i64,
+            end: i64,
+            key: (String, String, String), // (app_class, title, workspace)
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, device_id, start_ts, end_ts, app_class, title, workspace
+             FROM intervals ORDER BY device_id, start_ts, id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Row {
+                    id: r.get(0)?,
+                    device: r.get(1)?,
+                    start: r.get(2)?,
+                    end: r.get(3)?,
+                    key: (r.get(4)?, r.get(5)?, r.get(6)?),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // The newest row per device (by end time) is protected.
+        let mut protected: std::collections::HashMap<&str, (i64, i64)> =
+            std::collections::HashMap::new();
+        for row in &rows {
+            let newest = protected
+                .entry(row.device.as_str())
+                .or_insert((row.end, row.id));
+            if (row.end, row.id) > *newest {
+                *newest = (row.end, row.id);
+            }
+        }
+
+        // Walk the rows in order, folding each into the current "head" row when allowed.
+        let mut deletions: Vec<i64> = Vec::new();
+        let mut extensions: Vec<(i64, i64)> = Vec::new(); // (head id, new end)
+        let mut head: Option<&Row> = None;
+        let mut head_end = 0;
+        for row in &rows {
+            let is_protected = protected.get(row.device.as_str()).map(|p| p.1) == Some(row.id);
+            let joins_head = !is_protected
+                && head.is_some_and(|h| {
+                    h.device == row.device && h.key == row.key && row.start - head_end <= max_gap
+                });
+            if joins_head {
+                head_end = head_end.max(row.end);
+                deletions.push(row.id);
+                if let Some(h) = head {
+                    // Remember the latest end for this head (later entries win).
+                    extensions.push((h.id, head_end));
+                }
+            } else {
+                head = Some(row);
+                head_end = row.end;
+            }
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        for (id, end) in extensions {
+            tx.execute(
+                "UPDATE intervals SET end_ts = MAX(end_ts, ?2) WHERE id = ?1",
+                params![id, end],
+            )?;
+        }
+        for id in &deletions {
+            tx.execute("DELETE FROM intervals WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(deletions.len())
+    }
+}
+
 /// Applies tracker effects to the database, remembering which row is open.
 pub struct Recorder {
     db: Db,
@@ -422,6 +547,89 @@ mod tests {
         assert_eq!(totals.len(), 2);
         assert!(totals.contains(&("zen".to_string(), 30)));
         assert!(totals.contains(&("wezterm".to_string(), 30)));
+    }
+
+    /// Insert a finished interval directly (for cleanup tests).
+    fn add_row(db: &Db, start: i64, end: i64, class: &str, title: &str) {
+        let snapshot = WindowSnapshot {
+            app_class: class.into(),
+            title: title.into(),
+            workspace: "1".into(),
+        };
+        let id = db.insert_open(start, &snapshot).unwrap();
+        db.finish(id, end).unwrap();
+    }
+
+    #[test]
+    fn rewrite_titles_changes_only_what_the_closure_changes() {
+        let db = Db::open_in_memory("box").unwrap();
+        add_row(&db, 100, 110, "discord", "#tcg");
+        add_row(&db, 110, 120, "discord", "#general");
+        add_row(&db, 120, 130, "wezterm", "fish");
+        let changed = db
+            .rewrite_titles(|class, title| {
+                if class == "discord" {
+                    String::new()
+                } else {
+                    title.to_string()
+                }
+            })
+            .unwrap();
+        assert_eq!(changed, 2);
+        let titles: Vec<_> = db
+            .recent(10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
+        assert_eq!(titles, vec!["fish", "", ""]);
+    }
+
+    #[test]
+    fn merge_adjacent_joins_identical_neighbours() {
+        let db = Db::open_in_memory("box").unwrap();
+        // Three Discord rows that became identical, then another app, then one more row.
+        add_row(&db, 100, 110, "discord", "");
+        add_row(&db, 110, 120, "discord", "");
+        add_row(&db, 121, 130, "discord", "");
+        add_row(&db, 130, 150, "zen", "");
+        add_row(&db, 150, 160, "discord", "");
+        let removed = db.merge_adjacent(2).unwrap();
+        assert_eq!(removed, 2);
+        let rows = db.recent(10).unwrap();
+        assert_eq!(rows.len(), 3);
+        // Oldest first: the three discord rows became one covering 100..130.
+        let first = rows.last().unwrap();
+        assert_eq!((first.start_ts, first.end_ts), (100, 130));
+    }
+
+    #[test]
+    fn merge_adjacent_respects_the_gap_and_never_touches_the_newest_row() {
+        let db = Db::open_in_memory("box").unwrap();
+        add_row(&db, 100, 110, "discord", "");
+        add_row(&db, 200, 210, "discord", ""); // far away: separate
+        add_row(&db, 210, 220, "discord", ""); // newest row: protected, so it stays
+        let removed = db.merge_adjacent(2).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(db.recent(10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn backup_to_writes_a_readable_copy() {
+        let dir = std::env::temp_dir().join(format!("timesink-vacuum-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("live.db"), "box").unwrap();
+        add_row(&db, 100, 110, "zen", "");
+
+        let backup_path = dir.join("copy.db");
+        db.backup_to(&backup_path).unwrap();
+        let copy = Db::open(&backup_path, "box").unwrap();
+        assert_eq!(copy.recent(10).unwrap().len(), 1);
+        // A second backup to the same path must fail rather than overwrite.
+        assert!(db.backup_to(&backup_path).is_err());
+
+        drop((db, copy));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
