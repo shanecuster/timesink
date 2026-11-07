@@ -9,6 +9,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Frame;
 
+use timesink_core::theme::{Rgb, Theme};
+
+use crate::banner;
 use crate::data::{DayRow, Snapshot, View};
 
 /// Everything the screen needs.
@@ -28,10 +31,16 @@ pub struct App {
     pub show_help: bool,
     /// A short message for the bottom line (e.g. a refresh error).
     pub status: Option<String>,
+    /// The colours for text, borders and highlights (category colours stay fixed).
+    pub theme: Theme,
+    /// Is the title banner (name, date, day sparkline) shown?
+    pub banner: bool,
 }
 
-/// Readable but quiet: key hints, axis labels and help text.
-const MUTED: Color = Color::Rgb(170, 175, 190);
+/// A theme colour as a terminal colour.
+fn tc(c: Rgb) -> Color {
+    Color::Rgb(c.0, c.1, c.2)
+}
 
 /// How the Categories and Applications lists are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +70,19 @@ impl SortMode {
 }
 
 impl App {
+    /// A bordered box in the theme's border colour with a title in the text colour.
+    fn block<'a>(&self, title: impl Into<Line<'a>>) -> Block<'a> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tc(self.theme.border)))
+            .title(title)
+    }
+
+    /// Quiet text (hints, axis labels).
+    fn muted(&self) -> Style {
+        Style::default().fg(tc(self.theme.muted))
+    }
+
     /// The colour of a category: fixed by its place in the config.
     pub fn color_of(&self, category: &str) -> Color {
         let index = self.category_names.iter().position(|c| c == category);
@@ -72,13 +94,30 @@ impl App {
 /// Paint the whole screen.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let [tabs_area, body, footer] = Layout::vertical([
+    // Fill everything with the theme's background and text colour first; every widget
+    // drawn after this inherits them wherever it does not set its own.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(tc(app.theme.bg)).fg(tc(app.theme.fg))),
+        area,
+    );
+
+    // The banner only shows when switched on and when the terminal is tall enough.
+    let banner_h = if app.banner && area.height >= banner::MIN_TERMINAL_HEIGHT {
+        banner::HEIGHT
+    } else {
+        0
+    };
+    let [banner_area, tabs_area, body, footer] = Layout::vertical([
+        Constraint::Length(banner_h),
         Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(area);
 
+    if banner_h > 0 {
+        draw_banner(frame, banner_area, app);
+    }
     draw_tabs(frame, tabs_area, app);
     match app.snapshot.view {
         View::Today => draw_today(frame, body, app),
@@ -86,8 +125,58 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     draw_footer(frame, footer, app);
     if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, area, app);
     }
+}
+
+/// The title banner: name and date on the left, today's hour-by-hour sparkline on the right.
+fn draw_banner(frame: &mut Frame, area: Rect, app: &App) {
+    let theme = &app.theme;
+    let snap = &app.snapshot;
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(banner::LEFT_WIDTH), Constraint::Min(0)])
+            .areas(area);
+
+    // Left: the spaced-out name in the accent colour, the date line underneath.
+    let name = Line::from(Span::styled(
+        format!(" {}", banner::NAME),
+        Style::default()
+            .fg(tc(theme.accent))
+            .add_modifier(Modifier::BOLD),
+    ));
+    let date = Line::styled(
+        format!(" {}", banner::date_line(snap.today)),
+        Style::default().fg(tc(theme.fg)),
+    );
+    frame.render_widget(Paragraph::new(vec![name, date]), left);
+
+    // Right: the sparkline, if the terminal is wide enough for it.
+    let per_hour = banner::columns_per_hour(area.width);
+    if per_hour == 0 {
+        return;
+    }
+    let hours = snap.days.last().map(|d| d.hours).unwrap_or([0; 24]);
+    let max = hours.iter().copied().max().unwrap_or(0);
+    let now_hour = (snap.now_secs / 3600).clamp(0, 23) as usize;
+    let mut bars: Vec<Span> = Vec::with_capacity(24);
+    for (h, secs) in hours.iter().enumerate() {
+        let glyph = banner::level_glyph(*secs, max).to_string().repeat(per_hour);
+        // Quiet hours use the border colour; busy ones fade from accent to banner_end
+        // through the day, so the right-hand side of the chart looks warmer.
+        let colour = if *secs > 0 {
+            theme.accent.lerp(theme.banner_end, h as f32 / 23.0)
+        } else {
+            theme.border
+        };
+        let mut style = Style::default().fg(tc(colour));
+        // Underline the current hour so "now" is easy to find (Today's numbers only).
+        if h == now_hour {
+            style = style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+        }
+        bars.push(Span::styled(glyph, style));
+    }
+    let axis = Line::styled(banner::axis_line(per_hour), app.muted());
+    frame.render_widget(Paragraph::new(vec![Line::from(bars), axis]), right);
 }
 
 /// The tab bar with the period's total on the right.
@@ -100,10 +189,10 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let title = format!(" timesink · {} active ", fmt_duration(app.snapshot.total));
     let tabs = Tabs::new(titles)
         .select(selected)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(app.block(title))
         .highlight_style(
             Style::default()
-                .fg(Color::Rgb(86, 156, 214))
+                .fg(tc(app.theme.accent))
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         );
     frame.render_widget(tabs, area);
@@ -159,14 +248,21 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let max = categories.iter().map(|c| c.1).max().unwrap_or(1).max(1);
     let inner_w = cat_area.width.saturating_sub(2) as usize;
     let lines: Vec<Line> = if categories.is_empty() {
-        vec![Line::styled(
-            "  nothing recorded yet",
-            Style::default().fg(MUTED),
-        )]
+        vec![Line::styled("  nothing recorded yet", app.muted())]
     } else {
         categories
             .iter()
-            .map(|(name, secs)| bar_line(name, *secs, max, inner_w, app.color_of(name), 12))
+            .map(|(name, secs)| {
+                bar_line(
+                    name,
+                    *secs,
+                    max,
+                    inner_w,
+                    app.color_of(name),
+                    12,
+                    tc(app.theme.border),
+                )
+            })
             .collect()
     };
     frame.render_widget(
@@ -192,6 +288,7 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
                 inner_w,
                 app.color_of(&a.category),
                 14,
+                tc(app.theme.border),
             )
         })
         .collect();
@@ -213,6 +310,7 @@ fn bar_line(
     width: usize,
     color: Color,
     name_w: usize,
+    track: Color,
 ) -> Line<'static> {
     let time = fmt_duration(secs);
     // " name  " + bar + " time"
@@ -230,7 +328,7 @@ fn bar_line(
         Span::styled("█".repeat(filled), Style::default().fg(color)),
         Span::styled(
             "░".repeat(bar_w.saturating_sub(filled)),
-            Style::default().fg(Color::Rgb(45, 45, 45)),
+            Style::default().fg(track),
         ),
         Span::raw(format!(" {time}")),
     ])
@@ -253,7 +351,7 @@ fn draw_hourly(frame: &mut Frame, area: Rect, app: &App) {
             let glyph = if on { "█" } else { " " };
             spans.push(Span::styled(
                 glyph.repeat(bar_w.saturating_sub(1).max(1)),
-                Style::default().fg(Color::Rgb(86, 156, 214)),
+                Style::default().fg(tc(app.theme.accent)),
             ));
             spans.push(Span::raw(
                 " ".repeat(bar_w.saturating_sub(bar_w.saturating_sub(1).max(1))),
@@ -269,15 +367,11 @@ fn draw_hourly(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             " ".repeat(bar_w)
         };
-        labels.push(Span::styled(text, Style::default().fg(MUTED)));
+        labels.push(Span::styled(text, app.muted()));
     }
     lines.push(Line::from(labels));
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Active time by hour "),
-        ),
+        Paragraph::new(lines).block(app.block(" Active time by hour ")),
         area,
     );
 }
@@ -310,8 +404,8 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
         let is_now = snap.now_secs >= from && snap.now_secs < to;
         cells.push(match best {
             Some((cat, _)) => Span::styled("█", Style::default().fg(app.color_of(cat))),
-            None if is_now => Span::styled("│", Style::default().fg(Color::White)),
-            None => Span::styled("·", Style::default().fg(Color::Rgb(60, 60, 60))),
+            None if is_now => Span::styled("│", Style::default().fg(tc(app.theme.fg))),
+            None => Span::styled("·", Style::default().fg(tc(app.theme.border))),
         });
     }
     // Hour ticks every six hours.
@@ -326,14 +420,8 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     let tick_line: String = ticks.into_iter().collect();
-    let lines = vec![
-        Line::from(cells),
-        Line::styled(tick_line, Style::default().fg(MUTED)),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Timeline ")),
-        area,
-    );
+    let lines = vec![Line::from(cells), Line::styled(tick_line, app.muted())];
+    frame.render_widget(Paragraph::new(lines).block(app.block(" Timeline ")), area);
 }
 
 /// Listening time per player, shown beside (not inside) the totals.
@@ -357,13 +445,9 @@ fn draw_listening(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::styled(
             text,
-            Style::default().fg(Color::Rgb(181, 137, 214)),
+            Style::default().fg(tc(app.theme.banner_end)),
         ))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Listening (not in totals) "),
-        ),
+        .block(app.block(" Listening (not in totals) ")),
         area,
     );
 }
@@ -390,12 +474,13 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     for h in (0..24).step_by(3) {
         header.push(Span::styled(
             format!("{:<w$}", h, w = cell_w * 3),
-            Style::default().fg(MUTED),
+            app.muted(),
         ));
     }
     let mut lines = vec![Line::from(header)];
     for (i, day) in snap.days.iter().enumerate().skip(skip) {
         lines.push(heat_row(
+            app,
             day,
             busiest_hour,
             cell_w,
@@ -404,17 +489,14 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Active time by day and hour "),
-        ),
+        Paragraph::new(lines).block(app.block(" Active time by day and hour ")),
         area,
     );
 }
 
 /// One heatmap row: date label, 24 coloured cells, daily total.
 fn heat_row(
+    app: &App,
     day: &DayRow,
     busiest: i64,
     cell_w: usize,
@@ -427,30 +509,28 @@ fn heat_row(
     let label_style = if is_today {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        app.muted()
     };
     let mut spans = vec![Span::styled(format!(" {date:<8} "), label_style)];
     for secs in day.hours.iter() {
         spans.push(Span::styled(
             "█".repeat(cell_w),
-            Style::default().fg(heat_color(*secs, busiest)),
+            Style::default().fg(heat_color(&app.theme, *secs, busiest)),
         ));
     }
     spans.push(Span::raw(format!(" {}", fmt_duration(day.total))));
     Line::from(spans)
 }
 
-/// From dark (no activity) to bright (the busiest hour on the screen).
-fn heat_color(secs: i64, busiest: i64) -> Color {
+/// From the theme's faint fill (no activity) to its bright "ok" colour (the busiest hour
+/// on the screen).
+fn heat_color(theme: &Theme, secs: i64, busiest: i64) -> Color {
     if secs <= 0 {
-        return Color::Rgb(32, 32, 36);
+        return tc(theme.selection);
     }
-    let t = (secs as f64 / busiest as f64).clamp(0.0, 1.0);
-    // Dim blue -> bright green.
-    let r = (30.0 + 40.0 * t) as u8;
-    let g = (70.0 + 150.0 * t) as u8;
-    let b = (110.0 - 40.0 * t) as u8;
-    Color::Rgb(r, g, b)
+    let t = (secs as f64 / busiest as f64).clamp(0.0, 1.0) as f32;
+    // Never fully faint once there is any activity, so a quiet hour still shows up.
+    tc(theme.selection.lerp(theme.ok, 0.25 + 0.75 * t))
 }
 
 /// The footer line: the export menu, an error, a notice, or the key hints.
@@ -462,18 +542,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.notice {
         msg.clone()
     } else {
-        " ←/→ or 1-3 switch view · s sort · e export · r refresh · ? help · q quit".to_string()
+        " ←/→ or 1-3 view · s sort · t theme · b banner · e export · r refresh · ? help · q quit"
+            .to_string()
     };
-    frame.render_widget(
-        Paragraph::new(Line::styled(text, Style::default().fg(MUTED))),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::styled(text, app.muted())), area);
 }
 
 /// A small box listing the keys.
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let w = 56.min(area.width);
-    let h = 12.min(area.height);
+    let h = 14.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -484,25 +562,18 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(" ←/→, Tab, h/l   next / previous view"),
         Line::from(" 1  2  3         Today / 7 days / 30 days"),
         Line::from(" s               sort by time / by name"),
+        Line::from(" t               next colour theme"),
+        Line::from(" b               show / hide the title banner"),
         Line::from(" e               export this view (csv, json, md, html)"),
         Line::from(" r               refresh now"),
         Line::from(" ?               close this help"),
         Line::from(" q, Esc          quit"),
         Line::from(""),
-        Line::styled(
-            " Listening time overlaps focus time, so it is",
-            Style::default().fg(MUTED),
-        ),
-        Line::styled(
-            " shown beside the totals, not inside.",
-            Style::default().fg(MUTED),
-        ),
+        Line::styled(" Listening time overlaps focus time, so it is", app.muted()),
+        Line::styled(" shown beside the totals, not inside.", app.muted()),
     ];
     frame.render_widget(ratatui::widgets::Clear, rect);
-    frame.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Help ")),
-        rect,
-    );
+    frame.render_widget(Paragraph::new(text).block(app.block(" Help ")), rect);
 }
 
 /// `1h 05m`, `4m 07s` or `12s`.
@@ -589,6 +660,8 @@ mod tests {
             notice: None,
             show_help: false,
             status: None,
+            theme: timesink_core::theme::THEMES[0],
+            banner: true,
         }
     }
 
@@ -692,6 +765,8 @@ mod tests {
             notice: None,
             show_help: false,
             status: None,
+            theme: timesink_core::theme::THEMES[0],
+            banner: true,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));
@@ -708,15 +783,68 @@ mod tests {
     }
 
     #[test]
-    fn busier_hours_are_brighter_and_empty_ones_dark() {
-        let Color::Rgb(_, g_low, _) = heat_color(60, 3600) else {
-            panic!("expected an rgb colour")
-        };
-        let Color::Rgb(_, g_high, _) = heat_color(3600, 3600) else {
-            panic!("expected an rgb colour")
-        };
-        assert!(g_high > g_low);
-        assert_eq!(heat_color(0, 3600), Color::Rgb(32, 32, 36));
+    fn busier_hours_are_brighter_and_empty_ones_use_the_faint_fill() {
+        for theme in timesink_core::theme::THEMES {
+            let Color::Rgb(r1, g1, b1) = heat_color(theme, 60, 3600) else {
+                panic!("expected an rgb colour")
+            };
+            let Color::Rgb(r2, g2, b2) = heat_color(theme, 3600, 3600) else {
+                panic!("expected an rgb colour")
+            };
+            // The busiest hour is exactly the theme's "ok" colour; quiet ones are nearer the fill.
+            assert_eq!((r2, g2, b2), (theme.ok.0, theme.ok.1, theme.ok.2));
+            assert_ne!((r1, g1, b1), (r2, g2, b2), "{}", theme.name);
+            assert_eq!(heat_color(theme, 0, 3600), tc(theme.selection));
+        }
+    }
+
+    #[test]
+    fn every_theme_draws_every_view_with_its_own_background() {
+        for theme in timesink_core::theme::THEMES {
+            for view in View::ALL {
+                let mut app = sample_app(view);
+                app.theme = *theme;
+                let backend = TestBackend::new(120, 40);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal.draw(|f| draw(f, &app)).unwrap();
+                // Every cell carries the theme background (nothing is left terminal-default).
+                let want = tc(theme.bg);
+                let buf = terminal.backend().buffer();
+                assert!(
+                    buf.content().iter().all(|c| c.bg == want),
+                    "{} / {:?}",
+                    theme.name,
+                    view
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn banner_shows_name_date_week_and_chart_and_can_hide() {
+        let app = sample_app(View::Today);
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("t i m e s i n k"), "{screen}");
+        // Day 100 after the epoch is 1970-04-11, a Saturday in ISO week 15.
+        assert!(
+            screen.contains("Saturday April 11 1970 · Week 15"),
+            "{screen}"
+        );
+        assert!(screen.contains("06"), "{screen}");
+
+        let mut hidden = sample_app(View::Today);
+        hidden.banner = false;
+        assert!(!render(&hidden, 120, 40).contains("t i m e s i n k"));
+
+        // Too short a terminal hides it automatically.
+        assert!(!render(&app, 120, 20).contains("t i m e s i n k"));
+    }
+
+    #[test]
+    fn banner_chart_drops_out_on_a_narrow_terminal_but_the_date_stays() {
+        let screen = render(&sample_app(View::Today), 50, 30);
+        assert!(screen.contains("Week 15"), "{screen}");
+        assert!(!screen.contains("▇"), "{screen}");
     }
 
     #[test]

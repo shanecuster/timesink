@@ -167,10 +167,34 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
 | `1` `2` `3` | Today / 7 days / 30 days |
 | `s` | sort the lists by time or by name |
+| `t` | next colour theme |
+| `b` | show / hide the title banner |
 | `e` | export the view you are looking at (then `c` csv, `j` json, `m` markdown, `h` html, `Esc` cancel) |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
 | `q`, `Esc` | quit |
+
+### Title banner and themes
+
+The top of the screen shows the name, today's full date with the ISO week
+number, and a small chart of how busy each hour of today was (the current hour
+is underlined). It hides itself on terminals shorter than 24 rows, and the
+chart drops out when the window is too narrow for it; `b` turns it off.
+
+`t` cycles through eight themes that match tuxwire and zerohour: Everforest
+(the default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo
+Night and Catppuccin Macchiato. Themes change the text, borders, background
+and highlights; the category colours stay the same in every theme so a
+category is always recognisable. Your theme, sort order and banner choice are
+remembered in `~/.config/timesink/tui.conf` (a separate file from
+`config.conf`, so saving a choice never rewrites your hand-written settings).
+You can also edit it by hand:
+
+```
+theme = Nord
+sort = name
+banner = on
+```
 
 ## Exports and backups
 

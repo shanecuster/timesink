@@ -1,5 +1,6 @@
 //! `timesink`: the terminal interface. Reads the database the daemon writes.
 
+mod banner;
 mod cli;
 mod commands;
 mod data;
@@ -15,6 +16,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use timesink_core::appmap::AppMap;
 use timesink_core::db::Db;
 use timesink_core::paths;
+use timesink_core::settings::Settings;
+use timesink_core::theme;
 
 use crate::data::{Snapshot, View};
 use crate::export::Format;
@@ -93,10 +96,21 @@ fn start() -> Result<()> {
 /// Open the interactive screens and run them until the user quits.
 fn run_interface(db: Db, map: AppMap) -> Result<()> {
     let snapshot = Snapshot::load(&db, &map, View::Today, now_ts(), &local_offset)?;
+    // Remembered choices (theme, sort order, banner). A broken settings file is not worth
+    // refusing to start over, so fall back to the defaults.
+    let settings = paths::tui_settings_path()
+        .and_then(|p| Settings::load(&p))
+        .unwrap_or_default();
     let mut app = App {
         snapshot,
         category_names: map.categories(),
-        sort: SortMode::Time,
+        sort: if settings.sort_by_name {
+            SortMode::Name
+        } else {
+            SortMode::Time
+        },
+        theme: *theme::find_or_default(&settings.theme),
+        banner: settings.banner,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -170,6 +184,19 @@ fn run(
                     KeyCode::Char('s') => {
                         // Only the order changes, so no need to re-read the database.
                         app.sort = app.sort.toggle();
+                        save_settings(app);
+                        None
+                    }
+                    KeyCode::Char('t') => {
+                        // Next theme in the list; the colours change on the next draw.
+                        app.theme = *theme::next(&app.theme);
+                        app.notice = Some(format!(" Theme: {}", app.theme.name));
+                        save_settings(app);
+                        None
+                    }
+                    KeyCode::Char('b') => {
+                        app.banner = !app.banner;
+                        save_settings(app);
                         None
                     }
                     KeyCode::Char('r') => Some(view),
@@ -186,6 +213,20 @@ fn run(
             reload(app, db, map, view);
             last_refresh = Instant::now();
         }
+    }
+}
+
+/// Remember the current theme, sort order and banner for the next run. A failure (say, a
+/// read-only home folder) is shown in the footer rather than stopping the interface.
+fn save_settings(app: &mut App) {
+    let settings = Settings {
+        theme: app.theme.name.to_string(),
+        sort_by_name: app.sort == SortMode::Name,
+        banner: app.banner,
+    };
+    let result = paths::tui_settings_path().and_then(|p| settings.save(&p));
+    if let Err(e) = result {
+        app.notice = Some(format!(" could not save settings: {e:#}"));
     }
 }
 
