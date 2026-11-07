@@ -59,12 +59,14 @@ fn read_config_file(name: &str) -> Result<Option<String>> {
     }
 }
 
-/// Load `hosts.conf`, which maps ssh hosts to friendly labels.
-/// Without the file every ssh host is recorded as "ssh: other".
-pub fn load_sanitizer() -> Result<Sanitizer> {
-    Ok(read_config_file("hosts.conf")?
+/// Build the privacy sanitizer from `hosts.conf` (ssh host labels) and the
+/// settings in `config.conf`. Without hosts.conf every ssh host is recorded
+/// as "ssh: other".
+pub fn load_sanitizer(config: &Config) -> Result<Sanitizer> {
+    let sanitizer = read_config_file("hosts.conf")?
         .map(|text| Sanitizer::from_hosts_conf(&text))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok(sanitizer.with_config(config))
 }
 
 /// Load `config.conf` (idle timeout etc.), falling back to the defaults.

@@ -4,6 +4,9 @@
 //!   timesink-daemon            run the collector (same as `run`)
 //!   timesink-daemon run -v     run and print each new interval to stderr
 //!   timesink-daemon report     print totals and recent intervals from the database
+//!   timesink-daemon scrub      back up the database, then remove stored titles the
+//!                              current settings would no longer record, and merge
+//!                              the rows that become identical
 //!
 //! Environment overrides (all optional):
 //!   TIMESINK_DB      full path of the database file
@@ -16,8 +19,10 @@ mod media;
 mod paths;
 mod service;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
-use timesink_core::db::Db;
+use timesink_core::db::{Db, MERGE_GAP_SECS};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,8 +36,41 @@ fn main() -> Result<()> {
     {
         None | Some("run") => service::run(verbose),
         Some("report") => report(),
-        Some(other) => anyhow::bail!("unknown command '{other}' (try: run, report)"),
+        Some("scrub") => scrub(),
+        Some(other) => anyhow::bail!("unknown command '{other}' (try: run, report, scrub)"),
     }
+}
+
+/// Clean up rows recorded before the current privacy settings existed.
+///
+/// A backup is written first. Stop the service before running this
+/// (`systemctl --user stop timesink-daemon`) and start it again afterwards.
+fn scrub() -> Result<()> {
+    let config = paths::load_config()?;
+    let sanitizer = paths::load_sanitizer(&config)?;
+    let path = paths::db_path()?;
+    if !path.exists() {
+        anyhow::bail!("no database at {}", path.display());
+    }
+    let db = Db::open(&path, &paths::device_id())?;
+
+    // 1. Back up first, to a name that cannot clash with an earlier backup.
+    let backup = PathBuf::from(format!(
+        "{}.bak-before-scrub-{}",
+        path.display(),
+        service::now_ts()
+    ));
+    db.backup_to(&backup)?;
+    println!("Backup written to {}", backup.display());
+
+    // 2. Re-apply today's rules to every stored title.
+    let changed = db.rewrite_titles(|app, title| sanitizer.rescrub_stored(app, title))?;
+    println!("Titles cleaned on {changed} rows");
+
+    // 3. Rows that are now identical neighbours become one.
+    let merged = db.merge_adjacent(MERGE_GAP_SECS)?;
+    println!("Rows merged away: {merged}");
+    Ok(())
 }
 
 /// Print a quick summary so you can check what was recorded.

@@ -24,9 +24,13 @@ Back-to-back intervals of the same window within 2 seconds are merged into one.
 
 ## Privacy defaults
 
-- **Browsers** (Zen, Firefox, Chromium family): only the app is recorded, never the page title.
-- **Terminals**: the command line is never stored (it can contain passwords or tokens).
-  Only the program name and directory are kept, e.g. `fish @ ~/Projects`.
+Only the app is recorded, with a few deliberate exceptions:
+
+- **Browsers** (Zen, Firefox, Chromium family): only the app, never the page title.
+- **Other apps** (chat, email, notes, file manager, ...): only the app. Channel names,
+  inboxes, note names and folder names are never stored.
+- **Terminals**: only the program that is running, e.g. `fish`, `tuxwire`, `zerohour`. The
+  command line is never stored (it can contain passwords or tokens).
 - **SSH**: stored as `ssh: <label>`. Labels come from `~/.config/timesink/hosts.conf`:
 
   ```
@@ -35,7 +39,6 @@ Back-to-back intervals of the same window within 2 seconds are merged into one.
   ```
 
   Unlisted hosts are stored as `ssh: other`. No IP addresses or user names are recorded.
-- **Other apps**: the window title is stored as-is.
 
 ## Settings
 
@@ -44,7 +47,27 @@ Back-to-back intervals of the same window within 2 seconds are merged into one.
 ```
 # minutes without input before time stops counting (whole minutes, minimum 1)
 idle_timeout_minutes = 5
+
+# how much of a terminal window to record: app, program (default) or program_dir
+terminal_detail = program
+
+# window classes (comma separated) allowed to record full titles. Empty by default.
+keep_titles =
 ```
+
+## Cleaning up older data
+
+Rows recorded before these privacy rules (for example Discord channel names) can be cleaned
+with one command. It writes a backup first, then removes the stored titles the current
+settings would no longer record and merges the rows that become identical:
+
+```fish
+systemctl --user stop timesink-daemon
+timesink-daemon scrub
+systemctl --user start timesink-daemon
+```
+
+The backup is `timesink.db.bak-before-scrub-<time>` next to the database.
 
 ## Run it
 

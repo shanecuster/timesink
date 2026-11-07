@@ -273,8 +273,8 @@ fn spawn_hyprland_watcher(tx: Sender<Msg>) {
 
 /// Run the collector. Only returns if the database cannot be opened.
 pub fn run(verbose: bool) -> Result<()> {
-    let sanitizer = paths::load_sanitizer()?;
     let config = paths::load_config()?;
+    let sanitizer = paths::load_sanitizer(&config)?;
     let path = paths::db_path()?;
     let recorder = Recorder::new(Db::open(&path, &paths::device_id())?);
     eprintln!("timesink: recording to {}", path.display());
