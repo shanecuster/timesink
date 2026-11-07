@@ -104,6 +104,7 @@ impl Service {
                 self.sample(now);
             }
             Msg::Sleep => {
+                eprintln!("timesink: system going to sleep");
                 // If this notice was only delivered after the machine woke up
                 // (the daemon was frozen), "now" is too late: the sleep began
                 // when we last saw it awake.
@@ -117,15 +118,18 @@ impl Service {
                 self.refresh_presence(now);
             }
             Msg::Wake => {
+                eprintln!("timesink: system woke up");
                 self.presence.sleep_ended();
                 self.refresh_presence(now);
                 self.sample(now);
             }
             Msg::Lock => {
+                eprintln!("timesink: screen locked");
                 self.presence.lock_started(now);
                 self.refresh_presence(now);
             }
             Msg::Unlock => {
+                eprintln!("timesink: screen unlocked");
                 self.presence.lock_ended();
                 self.refresh_presence(now);
                 self.sample(now);
