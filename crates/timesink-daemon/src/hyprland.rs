@@ -209,7 +209,7 @@ impl EventStream {
             }
             // Otherwise read more bytes from the socket.
             let mut buf = [0u8; 4096];
-            match self.stream.read(&mut buf) {
+            match read_retrying(&mut self.stream, &mut buf) {
                 Ok(0) => return Ok(Next::Closed),
                 Ok(n) => self.queue.extend(self.splitter.push(&buf[..n])),
                 Err(e)
@@ -226,10 +226,51 @@ impl EventStream {
     }
 }
 
+/// Read from `source`, trying again whenever the call is interrupted.
+///
+/// A signal (or the machine suspending and resuming) can make a read fail
+/// with `Interrupted` even though nothing is wrong with the connection.
+/// That is not an error, so it must not cause a reconnect.
+fn read_retrying<R: Read>(source: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match source.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    /// A reader that fails with `Interrupted` a few times before giving data.
+    struct Flaky {
+        interruptions_left: u32,
+    }
+
+    impl Read for Flaky {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.interruptions_left > 0 {
+                self.interruptions_left -= 1;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            buf[..2].copy_from_slice(b"ok");
+            Ok(2)
+        }
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried() {
+        let mut reader = Flaky {
+            interruptions_left: 3,
+        };
+        let mut buf = [0u8; 8];
+        let n = read_retrying(&mut reader, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ok");
+        assert_eq!(reader.interruptions_left, 0);
+    }
 
     #[test]
     fn parses_a_normal_reply() {
