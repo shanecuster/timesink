@@ -280,6 +280,9 @@ pub fn run(verbose: bool) -> Result<()> {
     let config = paths::load_config()?;
     let sanitizer = paths::load_sanitizer(&config)?;
     let path = paths::db_path()?;
+    // Refuse to start if another daemon is already recording; two would
+    // double every total. The lock is held until this function returns.
+    let _instance = crate::lock::InstanceLock::acquire(&paths::data_dir()?.join("timesink.lock"))?;
     let recorder = Recorder::new(Db::open(&path, &paths::device_id())?);
     eprintln!("timesink: recording to {}", path.display());
 
