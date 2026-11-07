@@ -84,3 +84,11 @@ pub fn tui_settings_path() -> Result<PathBuf> {
 pub fn apps_conf_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("apps.conf"))
 }
+
+/// Load `domains.conf` (browser class, blocked sites, site names and categories). Without
+/// the file the defaults apply: the browser is `zen`, nothing is blocked.
+pub fn load_domain_config() -> Result<crate::domains::DomainConfig> {
+    Ok(read_config_file("domains.conf")?
+        .map(|text| crate::domains::DomainConfig::from_conf(&text))
+        .unwrap_or_default())
+}

@@ -1,0 +1,17 @@
+[package]
+name = "timesink-zen"
+version.workspace = true
+edition.workspace = true
+description = "Helper that receives website reports from the optional Zen/Firefox extension"
+
+# Installed as `timesink-zen-host`: the browser starts it (native messaging) and it writes
+# the reported site into the timesink database.
+[[bin]]
+name = "timesink-zen-host"
+path = "src/main.rs"
+
+[dependencies]
+timesink-core = { path = "../timesink-core" }
+anyhow = "1"
+# serde_json: reads the extension's small JSON messages and writes the host manifest.
+serde_json = "1"

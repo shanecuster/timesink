@@ -7,7 +7,12 @@
 #   - timesink-tui:    the terminal interface (charts and summaries).
 [workspace]
 resolver = "2"
-members = ["crates/timesink-core", "crates/timesink-daemon", "crates/timesink-tui"]
+members = [
+    "crates/timesink-core",
+    "crates/timesink-daemon",
+    "crates/timesink-tui",
+    "crates/timesink-zen",
+]
 
 # Settings shared by every crate in the workspace.
 [workspace.package]
