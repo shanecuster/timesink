@@ -1,6 +1,9 @@
 //! `timesink`: the terminal interface. Reads the database the daemon writes.
 
+mod cli;
+mod commands;
 mod data;
+mod export;
 mod palette;
 mod ui;
 
@@ -41,8 +44,15 @@ fn main() {
     }
 }
 
-/// Open the database, then run the interface until the user quits.
+/// Work out what was asked for, then do it.
 fn start() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = cli::parse(&args).map_err(anyhow::Error::msg)?;
+    if command == cli::Command::Help {
+        print!("{}", cli::USAGE);
+        return Ok(());
+    }
+
     let path = paths::db_path()?;
     if !path.exists() {
         anyhow::bail!(
@@ -53,6 +63,34 @@ fn start() -> Result<()> {
     let db = Db::open(&path, &paths::device_id())?;
     let map = paths::load_app_map()?;
 
+    match command {
+        cli::Command::Export {
+            format,
+            days,
+            out,
+            force,
+        } => {
+            let request = commands::ExportRequest {
+                format,
+                days,
+                out: out.as_deref(),
+                force,
+            };
+            let file = commands::run_export(&db, &map, &request, now_ts(), &local_offset)?;
+            println!("Wrote {}", file.display());
+            Ok(())
+        }
+        cli::Command::Backup { out } => {
+            let file = commands::run_backup(&db, out.as_deref(), now_ts(), &local_offset)?;
+            println!("Backup written to {}", file.display());
+            Ok(())
+        }
+        cli::Command::Tui | cli::Command::Help => run_interface(db, map),
+    }
+}
+
+/// Open the interactive screens and run them until the user quits.
+fn run_interface(db: Db, map: AppMap) -> Result<()> {
     let snapshot = Snapshot::load(&db, &map, View::Today, now_ts(), &local_offset)?;
     let mut app = App {
         snapshot,

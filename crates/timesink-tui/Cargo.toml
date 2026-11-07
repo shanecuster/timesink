@@ -18,3 +18,5 @@ ratatui = "0.30"
 crossterm = "0.29"
 # chrono: local time zone and calendar dates.
 chrono = "0.4"
+# serde_json: writes the JSON export with correct escaping.
+serde_json = "1"

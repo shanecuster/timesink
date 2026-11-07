@@ -36,6 +36,12 @@ pub fn rgb_for(index: Option<usize>) -> (u8, u8, u8) {
     }
 }
 
+/// The same colour as a CSS hex string such as `#569cd6`.
+pub fn hex_for(index: Option<usize>) -> String {
+    let (r, g, b) = rgb_for(index);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +54,11 @@ mod tests {
         let (r0, _, _) = rgb_for(Some(0));
         let (r12, _, _) = rgb_for(Some(12));
         assert!(r12 < r0);
+    }
+
+    #[test]
+    fn hex_is_lowercase_and_padded() {
+        assert_eq!(hex_for(Some(0)), "#569cd6");
+        assert_eq!(hex_for(None), "#808080");
     }
 }
