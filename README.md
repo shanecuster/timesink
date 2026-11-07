@@ -240,13 +240,29 @@ Then load the extension from the `extension/` folder:
 - To try it: open `about:debugging#/runtime/this-firefox`, choose **Load
   Temporary Add-on** and pick `extension/manifest.json`. It lasts until the
   browser restarts.
-- To keep it: sign it privately (free, "unlisted") with
-  `web-ext sign --channel=unlisted --source-dir extension` using your own addons.mozilla.org
-  API keys (keep those out of the repo), then open the resulting `.xpi` in the
-  browser. Release builds of Firefox-based browsers only accept signed add-ons.
+- To keep it (recommended): sign it privately and install the `.xpi`. Release
+  builds of Zen and Firefox only keep signed add-ons. Signing is free and
+  *unlisted*: Mozilla signs the file and hands it back; nothing is published.
+  1. Make API keys at <https://addons.mozilla.org/developers/addon/api/key/>
+     and put them in your environment, never in the repo:
+     `set -Ux WEB_EXT_API_KEY user:...` and `set -Ux WEB_EXT_API_SECRET ...` (fish).
+  2. `sh contrib/sign-extension.sh` (needs node/npm). The signed file lands in
+     `web-ext-artifacts/`.
+  3. In Zen: `about:addons`, gear menu, **Install Add-on From File...**, pick the `.xpi`.
+  4. Repeat step 3 in Firefox if you want it there too (the same file works).
+  Each new signing needs a higher `version` in `extension/manifest.json`.
+
+Zen and Firefox each start their own helper, so both can run the extension at
+once. `browser = zen, firefox` (the default) is what counts site time against.
+
+If site time ever stops recording, run `timesink-zen-host status`: it shows
+whether the browser registrations exist and still point at the installed
+program, which browsers are counted, and when the last report arrived. The usual
+causes are a temporary add-on that was lost on restart, the extension being
+disabled in `about:addons`, or the helper having moved (run `install` again).
 
 `domains.conf` (see `contrib/domains.conf.example`) holds the browser's window
-class (`browser = zen`), sites to never record (`block = site`) and friendly
+class(es) (`browser = zen, firefox`), sites to never record (`block = site`) and friendly
 names and categories for sites, in the same layout as `apps.conf`.
 
 Delete what was stored: `timesink-zen-host forget --all`, or

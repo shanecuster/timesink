@@ -2,3 +2,5 @@
 *.db
 *.db-journal
 *.bak*
+web-ext-artifacts/
+node_modules/
