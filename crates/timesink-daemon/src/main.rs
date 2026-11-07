@@ -133,9 +133,11 @@ fn report() -> Result<()> {
     }
 
     println!("\nLast 24 hours, by application:");
+    // Size the name column from the longest name so nothing runs into the category.
+    let width = apps.iter().map(|a| a.display.len()).max().unwrap_or(0);
     for app in &apps {
         println!(
-            "  {:>9}  {:<14} {}",
+            "  {:>9}  {:<width$}  {}",
             format_duration(app.secs),
             app.display,
             app.category
