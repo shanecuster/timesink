@@ -1,16 +1,20 @@
 //! Privacy rules: decide what text from a window title is allowed into the database.
 //!
 //! Defaults are deliberately conservative:
-//!   - Browsers: the title is dropped (a Zen extension will report domains later).
+//!   - Browsers: the title is always dropped (a Zen extension may report domains later).
 //!   - Terminals: the full command line is NEVER stored, because commands can
-//!     contain passwords or tokens. Only the program name and directory are kept.
+//!     contain passwords or tokens. By default only the program name is kept
+//!     (`terminal_detail` can reduce this to the app or add the directory).
 //!   - SSH sessions: stored as `ssh: <label>`, where the label comes from a local
 //!     hosts file. Unknown hosts become `ssh: other`, so IP addresses and user
 //!     names never reach the database.
-//!   - Everything else: the title is stored as-is.
+//!   - Everything else: only the app is recorded. Titles of chat channels, email
+//!     inboxes, notes and similar are dropped unless the app is listed in
+//!     `keep_titles`.
 
 use std::collections::HashMap;
 
+use crate::config::{Config, TerminalDetail};
 use crate::title::{parse_terminal_title, split_tab_prefix, ssh_target};
 
 /// What kind of application a window class belongs to.
@@ -61,12 +65,26 @@ pub fn classify(app_class: &str) -> AppKind {
 pub struct Sanitizer {
     /// Maps an ssh host name or IP to a friendly label such as `proxmox`.
     host_labels: HashMap<String, String>,
+    /// How much of a terminal window to record.
+    terminal_detail: TerminalDetail,
+    /// Lowercase window classes whose full title may be recorded.
+    keep_titles: Vec<String>,
 }
 
 impl Sanitizer {
     /// Build a sanitizer from an explicit host-to-label map.
     pub fn new(host_labels: HashMap<String, String>) -> Self {
-        Self { host_labels }
+        Self {
+            host_labels,
+            ..Self::default()
+        }
+    }
+
+    /// Apply the privacy-related settings from `config.conf`.
+    pub fn with_config(mut self, config: &Config) -> Self {
+        self.terminal_detail = config.terminal_detail;
+        self.keep_titles = config.keep_titles.clone();
+        self
     }
 
     /// Build a sanitizer from the text of a `hosts.conf` file.
@@ -82,7 +100,7 @@ impl Sanitizer {
             .map(|(host, label)| (host.trim().to_string(), label.trim().to_string()))
             .filter(|(host, label)| !host.is_empty() && !label.is_empty())
             .collect();
-        Self { host_labels }
+        Self::new(host_labels)
     }
 
     /// Produce the title that is safe to store for a window.
@@ -91,13 +109,45 @@ impl Sanitizer {
             // Browsers: record only the app, never the page title.
             AppKind::Browser => String::new(),
             AppKind::Terminal => self.clean_terminal_title(raw_title),
-            // Other apps: keep the title, minus a terminal-style tab prefix if any.
-            AppKind::Other => split_tab_prefix(raw_title).1.to_string(),
+            // Other apps: app-only unless the user opted in for this app.
+            AppKind::Other if self.keeps_title(app_class) => {
+                split_tab_prefix(raw_title).1.to_string()
+            }
+            AppKind::Other => String::new(),
         }
     }
 
-    /// Reduce a terminal title to `ssh: <label>` or `<program> @ <directory>`.
+    /// Re-apply the current rules to a title that is ALREADY stored.
+    ///
+    /// Used by the cleanup command on old rows. Stored terminal titles look like
+    /// `fish @ ~/dir` or `ssh: label`, so they can be shortened but never rebuilt.
+    pub fn rescrub_stored(&self, app_class: &str, stored: &str) -> String {
+        match classify(app_class) {
+            AppKind::Browser => String::new(),
+            AppKind::Terminal => match self.terminal_detail {
+                TerminalDetail::App => String::new(),
+                // Drop a trailing " @ directory"; `ssh: label` has none and stays.
+                TerminalDetail::Program => stored.split(" @ ").next().unwrap_or(stored).to_string(),
+                TerminalDetail::ProgramDir => stored.to_string(),
+            },
+            AppKind::Other if self.keeps_title(app_class) => stored.to_string(),
+            AppKind::Other => String::new(),
+        }
+    }
+
+    /// Did the user opt in to recording full titles for this app?
+    fn keeps_title(&self, app_class: &str) -> bool {
+        self.keep_titles
+            .iter()
+            .any(|class| class.eq_ignore_ascii_case(app_class))
+    }
+
+    /// Reduce a terminal title to `ssh: <label>`, `<program>` or `<program> @ <directory>`.
     fn clean_terminal_title(&self, raw_title: &str) -> String {
+        // App-only: nothing from the title is recorded at all.
+        if self.terminal_detail == TerminalDetail::App {
+            return String::new();
+        }
         let parsed = parse_terminal_title(raw_title);
         // The title shows the program as typed (`./target/release/foo`, `/usr/bin/ssh`);
         // keep only the file name so paths never end up in the database.
@@ -113,10 +163,13 @@ impl Sanitizer {
             }
         }
 
-        // Anything else: program name and directory only, never the command line.
+        // Anything else: the program name, plus the directory only if asked for.
+        // The command line is never stored.
         match (process, parsed.cwd) {
-            (Some(process), Some(cwd)) => format!("{process} @ {cwd}"),
-            (Some(process), None) => process.to_string(),
+            (Some(process), Some(cwd)) if self.terminal_detail == TerminalDetail::ProgramDir => {
+                format!("{process} @ {cwd}")
+            }
+            (Some(process), _) => process.to_string(),
             // Unrecognised title format: store nothing rather than guess.
             (None, _) => "terminal".to_string(),
         }
@@ -134,26 +187,15 @@ mod tests {
 
     const WEZTERM: &str = "org.wezfurlong.wezterm";
 
-    #[test]
-    fn program_paths_are_reduced_to_the_file_name() {
-        let s = sanitizer();
-        assert_eq!(
-            s.clean_title(
-                WEZTERM,
-                "~/Projects/timesink: ./target/release/timesink-daemon - ./target/release/timesink-daemon"
-            ),
-            "timesink-daemon @ ~/Projects/timesink"
-        );
-        // A full path to ssh is still recognised as an ssh session.
-        assert_eq!(
-            s.clean_title(WEZTERM, "~: /usr/bin/ssh admin@192.0.2.10 - /usr/bin/ssh"),
-            "ssh: proxmox"
-        );
-    }
-
-    /// A sanitizer that knows one example host (TEST-NET address, not a real machine).
+    /// A sanitizer with the default settings that knows one example host
+    /// (a TEST-NET address, not a real machine).
     fn sanitizer() -> Sanitizer {
         Sanitizer::from_hosts_conf("# my servers\n192.0.2.10 = proxmox\n\nbox=lab\n")
+    }
+
+    /// The same sanitizer with settings parsed from a config.conf text.
+    fn sanitizer_with(conf: &str) -> Sanitizer {
+        sanitizer().with_config(&Config::from_conf(conf))
     }
 
     #[test]
@@ -174,19 +216,88 @@ mod tests {
     }
 
     #[test]
-    fn shell_prompt_keeps_program_and_directory() {
+    fn browser_titles_are_dropped_even_when_listed_in_keep_titles() {
+        let s = sanitizer_with("keep_titles = zen");
+        assert_eq!(s.clean_title("zen", "Some page - Zen"), "");
+    }
+
+    #[test]
+    fn other_apps_are_app_only_by_default() {
+        let s = sanitizer();
+        assert_eq!(s.clean_title("discord", "#tcg | Some Server - Discord"), "");
+        assert_eq!(
+            s.clean_title("eu.betterbird.Betterbird", "Inbox - me@example.com"),
+            ""
+        );
+        assert_eq!(s.clean_title("steam", "Library"), "");
+    }
+
+    #[test]
+    fn keep_titles_opts_one_app_in() {
+        let s = sanitizer_with("keep_titles = org.gnome.Nautilus");
+        assert_eq!(
+            s.clean_title("org.gnome.nautilus", "[1/2] Downloads"),
+            "Downloads"
+        );
+        // Other apps stay app-only.
+        assert_eq!(s.clean_title("discord", "#tcg"), "");
+    }
+
+    #[test]
+    fn terminal_default_is_program_only() {
         let t = sanitizer().clean_title(WEZTERM, "[4/4] ~/Projects - fish");
-        assert_eq!(t, "fish @ ~/Projects");
+        assert_eq!(t, "fish");
+    }
+
+    #[test]
+    fn terminal_program_dir_mode_adds_the_directory() {
+        let s = sanitizer_with("terminal_detail = program_dir");
+        assert_eq!(
+            s.clean_title(WEZTERM, "[4/4] ~/Projects - fish"),
+            "fish @ ~/Projects"
+        );
+    }
+
+    #[test]
+    fn terminal_app_mode_records_nothing_from_the_title() {
+        let s = sanitizer_with("terminal_detail = app");
+        assert_eq!(s.clean_title(WEZTERM, "~: ssh admin@192.0.2.10 - ssh"), "");
+        assert_eq!(s.clean_title(WEZTERM, "~/Projects - fish"), "");
+    }
+
+    #[test]
+    fn program_paths_are_reduced_to_the_file_name() {
+        let s = sanitizer_with("terminal_detail = program_dir");
+        assert_eq!(
+            s.clean_title(
+                WEZTERM,
+                "~/Projects/timesink: ./target/release/timesink-daemon - ./target/release/timesink-daemon"
+            ),
+            "timesink-daemon @ ~/Projects/timesink"
+        );
+        // Without the directory setting only the file name remains.
+        assert_eq!(
+            sanitizer().clean_title(
+                WEZTERM,
+                "~/Projects/timesink: ./target/release/timesink-daemon - ./target/release/timesink-daemon"
+            ),
+            "timesink-daemon"
+        );
+        // A full path to ssh is still recognised as an ssh session.
+        assert_eq!(
+            sanitizer().clean_title(WEZTERM, "~: /usr/bin/ssh admin@192.0.2.10 - /usr/bin/ssh"),
+            "ssh: proxmox"
+        );
     }
 
     #[test]
     fn commands_are_never_stored() {
-        let t = sanitizer().clean_title(
-            WEZTERM,
-            "~: curl -H 'Authorization: Bearer abc123' https://example.com - curl",
-        );
-        assert_eq!(t, "curl @ ~");
-        assert!(!t.contains("abc123"));
+        let title = "~: curl -H 'Authorization: Bearer abc123' https://example.com - curl";
+        for conf in ["", "terminal_detail = program_dir"] {
+            let t = sanitizer_with(conf).clean_title(WEZTERM, title);
+            assert!(t.starts_with("curl"), "{t}");
+            assert!(!t.contains("abc123"), "{t}");
+        }
     }
 
     #[test]
@@ -202,9 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn named_tui_tab_is_kept() {
+    fn named_tui_tab_is_kept_by_program_name() {
         let t = sanitizer().clean_title(WEZTERM, "~: tuxwire - tuxwire");
-        assert_eq!(t, "tuxwire @ ~");
+        assert_eq!(t, "tuxwire");
     }
 
     #[test]
@@ -213,8 +324,25 @@ mod tests {
     }
 
     #[test]
-    fn other_apps_keep_their_title() {
-        assert_eq!(sanitizer().clean_title("steam", "Library"), "Library");
+    fn rescrub_shortens_and_blanks_stored_titles() {
+        let s = sanitizer();
+        // Terminal: directory is dropped, ssh label and fallback stay.
+        assert_eq!(s.rescrub_stored(WEZTERM, "fish @ ~/Projects"), "fish");
+        assert_eq!(s.rescrub_stored(WEZTERM, "ssh: proxmox"), "ssh: proxmox");
+        assert_eq!(s.rescrub_stored(WEZTERM, "terminal"), "terminal");
+        // Other apps and browsers are blanked.
+        assert_eq!(s.rescrub_stored("discord", "#tcg | Some Server"), "");
+        assert_eq!(s.rescrub_stored("zen", "anything"), "");
+        // Opt-in apps keep what was stored; program_dir keeps the directory.
+        let keep = sanitizer_with("keep_titles = discord");
+        assert_eq!(keep.rescrub_stored("discord", "#tcg"), "#tcg");
+        let dir = sanitizer_with("terminal_detail = program_dir");
+        assert_eq!(
+            dir.rescrub_stored(WEZTERM, "fish @ ~/Projects"),
+            "fish @ ~/Projects"
+        );
+        let app = sanitizer_with("terminal_detail = app");
+        assert_eq!(app.rescrub_stored(WEZTERM, "fish @ ~/Projects"), "");
     }
 
     #[test]
