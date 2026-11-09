@@ -434,6 +434,15 @@ impl Db {
         Ok(())
     }
 
+    /// Start time of the earliest recorded focus interval, if anything has been recorded.
+    /// Used by the "All time" view to know how far back to look.
+    pub fn earliest_start(&self) -> Result<Option<i64>> {
+        let t: Option<i64> =
+            self.conn
+                .query_row("SELECT MIN(start_ts) FROM intervals", [], |r| r.get(0))?;
+        Ok(t)
+    }
+
     /// All site stretches that overlap `[from_ts, to_ts)` as (site, start, end), oldest first.
     pub fn domains_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
         let mut stmt = self.conn.prepare(

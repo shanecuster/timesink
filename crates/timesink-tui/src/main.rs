@@ -202,6 +202,8 @@ fn run(
                     KeyCode::Char('1') => Some(View::Today),
                     KeyCode::Char('2') => Some(View::Week),
                     KeyCode::Char('3') => Some(View::Month),
+                    KeyCode::Char('4') => Some(View::Year),
+                    KeyCode::Char('5') => Some(View::All),
                     KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
                         None
@@ -286,7 +288,8 @@ fn save_settings(app: &mut App) {
 fn export_view(db: &Db, map: &AppMap, format: Format, view: View) -> String {
     let request = commands::ExportRequest {
         format,
-        days: view.days(),
+        // 0 means "everything recorded" (the All time view).
+        days: view.days().unwrap_or(0),
         out: None,
         force: false,
     };

@@ -135,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_tabs(frame, tabs_area, app);
     match app.snapshot.view {
         View::Today => draw_today(frame, body, app),
-        View::Week | View::Month => draw_range(frame, body, app),
+        View::Week | View::Month | View::Year | View::All => draw_range(frame, body, app),
     }
     draw_footer(frame, footer, app);
     if app.show_help {
@@ -232,13 +232,18 @@ fn draw_today(frame: &mut Frame, area: Rect, app: &App) {
     draw_listening(frame, listening, app);
 }
 
-/// 7 or 30 days: the heatmap on the left, summaries on the right.
+/// 7 days or longer: the heatmap (or monthly bars) on the left, summaries on the right.
 fn draw_range(frame: &mut Frame, area: Rect, app: &App) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(area);
     let [map_area, listening_area] =
         Layout::vertical([Constraint::Min(6), Constraint::Length(4)]).areas(left);
-    draw_heatmap(frame, map_area, app);
+    // Too many days to list for a year or longer, so those views sum up by month instead.
+    if app.snapshot.view.by_month() {
+        draw_months(frame, map_area, app);
+    } else {
+        draw_heatmap(frame, map_area, app);
+    }
     draw_listening(frame, listening_area, app);
     draw_summary(frame, right, app);
 }
@@ -511,6 +516,56 @@ fn draw_listening(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// One bar per calendar month for the Year and All time views. Newest months are kept
+/// when there is not room for all of them.
+fn draw_months(frame: &mut Frame, area: Rect, app: &App) {
+    let snap = &app.snapshot;
+    let rows = area.height.saturating_sub(2) as usize;
+    let skip = snap.months.len().saturating_sub(rows);
+    let max = snap
+        .months
+        .iter()
+        .map(|m| m.total)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = if snap.months.is_empty() {
+        vec![Line::styled("  nothing recorded yet", app.muted())]
+    } else {
+        snap.months
+            .iter()
+            .skip(skip)
+            .map(|m| {
+                let name = chrono::NaiveDate::from_ymd_opt(m.year, m.month, 1)
+                    .map(|d| d.format("%b %Y").to_string())
+                    .unwrap_or_default();
+                bar_line(
+                    &name,
+                    m.total,
+                    max,
+                    inner_w,
+                    tc(app.theme.accent),
+                    8,
+                    tc(app.theme.border),
+                )
+            })
+            .collect()
+    };
+    // Average over the days that had any activity, so a quiet month does not drag it down.
+    let active: i64 = snap.months.iter().map(|m| m.active_days).sum();
+    let title = if active > 0 {
+        format!(
+            " Active time by month · {} active days · avg {}/day ",
+            active,
+            fmt_duration(snap.total / active)
+        )
+    } else {
+        " Active time by month ".to_string()
+    };
+    frame.render_widget(Paragraph::new(lines).block(app.block(title)), area);
+}
+
 /// Days down the side, hours across, darker = less active.
 fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snapshot;
@@ -619,7 +674,7 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     );
     let text = vec![
         Line::from(" ←/→, Tab, h/l   next / previous view"),
-        Line::from(" 1  2  3         Today / 7 days / 30 days"),
+        Line::from(" 1-5             Today / 7 days / 30 days / Year / All"),
         Line::from(" s               sort by time / by name"),
         Line::from(" a               rename an app / change its category"),
         Line::from(" t               next colour theme"),
@@ -813,6 +868,22 @@ mod tests {
             assign: Assign::Closed,
             site_categories: Vec::new(),
         }
+    }
+
+    #[test]
+    fn year_and_all_time_show_months_instead_of_the_day_grid() {
+        for view in [View::Year, View::All] {
+            let screen = render(&sample_app(view), 120, 40);
+            assert!(
+                screen.contains("Active time by month"),
+                "{view:?}\n{screen}"
+            );
+            assert!(!screen.contains("Active time by day and hour"));
+            assert!(screen.contains("Year") && screen.contains("All time"));
+        }
+        // The shorter views still show the day-by-hour grid.
+        let screen = render(&sample_app(View::Month), 120, 40);
+        assert!(screen.contains("Active time by day and hour"));
     }
 
     /// Render an app into a plain-text screen of the given size.

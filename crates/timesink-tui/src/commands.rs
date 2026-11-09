@@ -15,12 +15,15 @@ use timesink_core::stats;
 use crate::data;
 use crate::export::{format_time, Format, ReportData};
 
-/// Short word for a period in file names: `today`, `week`, `month`, `45days`.
+/// Short word for a period in file names: `today`, `week`, `month`, `year`, `all`, `45days`.
+/// (0 days is the request for everything recorded.)
 fn period_slug(days: i64) -> String {
     match days {
+        0 => "all".to_string(),
         1 => "today".to_string(),
         7 => "week".to_string(),
         30 => "month".to_string(),
+        365 => "year".to_string(),
         n => format!("{n}days"),
     }
 }
@@ -140,7 +143,7 @@ fn local_date(now: i64, tz: &dyn Fn(i64) -> i64) -> String {
 pub struct ExportRequest<'a> {
     /// File format.
     pub format: Format,
-    /// Number of days, ending today.
+    /// Number of days, ending today; 0 means everything recorded so far.
     pub days: i64,
     /// Where to write; the default folder is used when absent.
     pub out: Option<&'a Path>,
@@ -156,7 +159,16 @@ pub fn run_export(
     now: i64,
     tz: &dyn Fn(i64) -> i64,
 ) -> Result<PathBuf> {
-    let data = collect(db, map, request.days, now, tz)?;
+    // "All" starts on the day of the first recorded interval.
+    let days = if request.days == 0 {
+        match db.earliest_start()? {
+            Some(t) => (stats::local_day(now, tz) - stats::local_day(t, tz) + 1).max(1),
+            None => 1,
+        }
+    } else {
+        request.days
+    };
+    let data = collect(db, map, days, now, tz)?;
     let stem = format!(
         "timesink-{}-{}",
         period_slug(request.days),

@@ -154,9 +154,12 @@ cargo install --path crates/timesink-tui
 timesink
 ```
 
-Three views (a Sites panel is added when the optional browser extension has recorded website time): **Today** (category and application bars, active time by hour,
+Five views (a Sites panel is added when the optional browser extension has recorded website time): **Today** (category and application bars, active time by hour,
 a coloured timeline of the day and listening time), **7 days** and **30 days**
-(a day-by-hour heatmap plus the same category and application bars). Category
+(a day-by-hour heatmap plus the same category and application bars), **Year**
+(the last 365 days) and **All time** (from the first day recorded). Year and All
+time sum up by calendar month instead of by day, with the number of active days
+and the average per active day in the panel title. Category
 colours follow the order in which categories first appear in `apps.conf`
 (the current theme's own accents, then deeper and lighter copies), so they stay the same on every
 screen. Put your most-used categories first to keep them easy to tell apart.
@@ -165,7 +168,7 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | Key | Action |
 | --- | --- |
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
-| `1` `2` `3` | Today / 7 days / 30 days |
+| `1` to `5` | Today / 7 days / 30 days / Year / All time |
 | `s` | sort the lists by time or by name |
 | `a` | rename an app or move it to another category (or a new one); saved to `apps.conf` |
 | `t` | next colour theme |
@@ -304,7 +307,7 @@ timesink backup                          # a dated copy of the database
   listening, with start, end, seconds, app, category, raw class and the cleaned
   detail). `md` and `html` are summaries: categories, applications, days and
   listening. The HTML page is one self-contained file with no scripts.
-- **Periods:** `-p today|week|month`, or `--days N` (1 to 3650).
+- **Periods:** `-p today|week|month|year|all`, or `--days N` (1 to 3650). `all` runs from the first recorded day, however long ago.
 - **Where:** `~/Documents/timesink-exports`, or `-o PATH`. A path with a file
   extension is a file; anything else is a folder (created if needed).
 - **Nothing is overwritten.** A second export on the same day becomes

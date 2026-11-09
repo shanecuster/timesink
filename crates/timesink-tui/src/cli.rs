@@ -53,7 +53,7 @@ USAGE
 
 EXPORT OPTIONS
   -f, --format FORMAT   csv, json, md or html           (default: html)
-  -p, --period PERIOD   today, week or month            (default: week)
+  -p, --period PERIOD   today, week, month, year or all (default: week)
       --days N          last N days instead of a period
   -o, --out PATH        a file (name with an extension) or a folder
       --force           replace an existing file
@@ -109,9 +109,12 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
                     "today" => 1,
                     "week" => 7,
                     "month" => 30,
+                    "year" => 365,
+                    // 0 = from the first recorded day (worked out when the report is made).
+                    "all" => 0,
                     other => {
                         return Err(format!(
-                            "unknown period '{other}' (use today, week or month, or --days N)"
+                            "unknown period '{other}' (use today, week, month, year or all, or --days N)"
                         ))
                     }
                 };
@@ -243,6 +246,15 @@ mod tests {
                 force: false
             })
         );
+        // `year` is 365 days; `all` is 0, which means "from the first recorded day".
+        assert!(matches!(
+            parse(&args("export -p year")),
+            Ok(Command::Export { days: 365, .. })
+        ));
+        assert!(matches!(
+            parse(&args("export --period all")),
+            Ok(Command::Export { days: 0, .. })
+        ));
         assert!(matches!(
             parse(&args("export --days 45")),
             Ok(Command::Export { days: 45, .. })
@@ -254,9 +266,9 @@ mod tests {
         assert!(parse(&args("export -f pdf"))
             .unwrap_err()
             .contains("unknown format 'pdf'"));
-        assert!(parse(&args("export -p year"))
+        assert!(parse(&args("export -p decade"))
             .unwrap_err()
-            .contains("unknown period 'year'"));
+            .contains("unknown period 'decade'"));
         assert!(parse(&args("export --days 0"))
             .unwrap_err()
             .contains("1 to 3650"));
