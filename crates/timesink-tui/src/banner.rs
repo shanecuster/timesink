@@ -38,9 +38,6 @@ pub const BIG_TITLE: [&str; 6] = [
     r" \__|_|_| |_| |_|\___||___/_|_| |_|_|\_\",
 ];
 
-/// Width reserved on the left in the large banner: the title plus a space either side.
-pub const BIG_LEFT_WIDTH: u16 = 42;
-
 /// Which banner to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
@@ -70,17 +67,18 @@ impl Size {
         }
     }
 
-    /// Columns reserved on the left for the name and date.
-    pub fn left_width(self) -> u16 {
+    /// Width of the name as drawn (it is centred across the banner).
+    pub fn title_width(self) -> u16 {
         match self {
-            Size::Compact => LEFT_WIDTH,
-            Size::Big => BIG_LEFT_WIDTH,
+            Size::Compact => NAME.chars().count() as u16,
+            Size::Big => BIG_TITLE[0].chars().count() as u16,
         }
     }
 }
 
-/// Width reserved on the left for the name and the date line. The longest date
-/// ("Wednesday September 30 2026 · Week 40") fits with a space either side.
+/// Width kept clear on the left for the date line, which sits at the left edge of the
+/// banner. The longest date ("Wednesday September 30 2026 · Week 40") fits with a space
+/// either side.
 pub const LEFT_WIDTH: u16 = 40;
 
 /// The program name, spaced out so it reads as a title rather than a word.
@@ -97,17 +95,30 @@ pub fn date_line(day: i64) -> String {
     }
 }
 
-/// How many terminal columns each hour gets in the chart for a given terminal width:
-/// 2 when there is plenty of room, 1 when it is tight, 0 when the chart does not fit.
-pub fn columns_per_hour(width: u16, left_width: u16) -> usize {
-    let free = width.saturating_sub(left_width) as usize;
-    if free > 24 * 2 {
-        2
-    } else if free > 24 {
-        1
-    } else {
-        0
+/// The first column of a `content_width`-wide block centred in `width` columns.
+pub fn centred_x(width: u16, content_width: u16) -> u16 {
+    width.saturating_sub(content_width) / 2
+}
+
+/// The first column of the chart when it is `columns` wide and pushed against the right
+/// edge, leaving a one-column margin.
+pub fn chart_x(width: u16, columns: u16) -> u16 {
+    width.saturating_sub(columns + 1)
+}
+
+/// How many terminal columns each hour gets in the chart: 2 when there is plenty of room,
+/// 1 when it is tight, 0 when it does not fit. The chart sits at the right edge, so it
+/// must stay clear of the centred name (with a two-column gap) and of the date line on
+/// the left.
+pub fn columns_per_hour(width: u16, title_width: u16) -> usize {
+    let title_end = centred_x(width, title_width) + title_width;
+    for per_hour in [2usize, 1] {
+        let x = chart_x(width, 24 * per_hour as u16);
+        if x >= title_end + 2 && x > LEFT_WIDTH {
+            return per_hour;
+        }
     }
+    0
 }
 
 /// The eight bar heights, shortest to tallest.
@@ -186,12 +197,32 @@ mod tests {
 
     #[test]
     fn columns_depend_on_width() {
-        assert_eq!(columns_per_hour(120, LEFT_WIDTH), 2);
-        assert_eq!(columns_per_hour(80, LEFT_WIDTH), 1);
-        assert_eq!(columns_per_hour(60, LEFT_WIDTH), 0);
-        // The large banner reserves a little more room on the left.
-        assert_eq!(columns_per_hour(120, BIG_LEFT_WIDTH), 2);
-        assert_eq!(columns_per_hour(80, BIG_LEFT_WIDTH), 1);
+        let small = Size::Compact.title_width();
+        let big = Size::Big.title_width();
+        // The compact name is short, so the chart fits at two columns an hour on a wide
+        // terminal, one on a medium one, and drops out on a narrow one.
+        assert_eq!(columns_per_hour(160, small), 2);
+        assert_eq!(columns_per_hour(100, small), 1);
+        assert_eq!(columns_per_hour(60, small), 0);
+        // The big title is centred and 40 wide, so the chart needs more room beside it.
+        assert_eq!(columns_per_hour(160, big), 2);
+        assert_eq!(columns_per_hour(120, big), 1);
+        assert_eq!(columns_per_hour(90, big), 0);
+        // Whatever it picks never overlaps the centred name or the date line.
+        for width in 20..200u16 {
+            for title in [small, big] {
+                let per_hour = columns_per_hour(width, title) as u16;
+                if per_hour > 0 {
+                    let x = chart_x(width, 24 * per_hour);
+                    assert!(x >= centred_x(width, title) + title + 2, "{width}");
+                    assert!(x > LEFT_WIDTH, "{width}");
+                    assert!(x + 24 * per_hour < width, "{width}");
+                }
+            }
+        }
+        assert_eq!(centred_x(120, 40), 40);
+        assert_eq!(centred_x(10, 40), 0);
+        assert_eq!(chart_x(120, 24), 95);
     }
 
     #[test]
@@ -227,17 +258,19 @@ mod tests {
         assert_eq!(Size::for_terminal(31), Some(Size::Compact));
         assert_eq!(Size::for_terminal(32), Some(Size::Big));
         assert_eq!(Size::Big.height(), BIG_HEIGHT);
-        assert_eq!(Size::Compact.left_width(), LEFT_WIDTH);
+        assert_eq!(Size::Big.title_width(), 40);
+        assert_eq!(Size::Compact.title_width(), 15);
     }
 
     #[test]
     fn the_big_title_fits_its_reserved_width() {
-        // Six rows, each narrower than the left block (which leaves a space either side).
+        // Six rows plus the date line, every row the same width so the title stays aligned
+        // when centred.
         assert_eq!(BIG_TITLE.len() as u16 + 1, BIG_HEIGHT);
         for row in BIG_TITLE {
-            assert!(row.chars().count() < BIG_LEFT_WIDTH as usize - 1, "{row}");
+            assert_eq!(row.chars().count(), 40, "{row}");
         }
-        // The date line fits under it too.
-        assert!(date_line(20_000).chars().count() < BIG_LEFT_WIDTH as usize);
+        // The date line fits in the space kept clear for it.
+        assert!(date_line(20_000).chars().count() < LEFT_WIDTH as usize);
     }
 }

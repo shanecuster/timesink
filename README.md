@@ -198,11 +198,13 @@ scrolls down to older ones.
 
 ### Title banner and themes
 
-The top of the screen shows the name, today's full date with the ISO week
-number, and a small chart of how busy each hour of today was (the current hour
-is underlined). On terminals 32 rows or taller the name is drawn large; between
+The top of the screen shows the name in the middle, today's full date with the
+ISO week number at the left, and a small chart of how busy each hour of today
+was against the right edge (the current hour is underlined). On terminals 32 rows or taller the name is drawn large; between
 24 and 31 rows it is the small spaced-out name; below 24 rows the banner hides
-itself. The chart drops out when the window is too narrow for it; `b` turns it off.
+itself. The chart drops out rather than touch the name when the window is too narrow
+for it (the big title needs about 100 columns for a one-column-per-hour chart,
+about 145 for two); `b` turns it off.
 
 `t` cycles through eight themes that match tuxwire and zerohour: Everforest
 (the default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo

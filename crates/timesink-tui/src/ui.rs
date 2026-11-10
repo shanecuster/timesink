@@ -276,36 +276,51 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-/// The title banner: name and date on the left, today's hour-by-hour sparkline on the right.
+/// The title banner in three parts: the date line at the left edge, the name centred, and
+/// today's hour-by-hour sparkline against the right edge.
 fn draw_banner(frame: &mut Frame, area: Rect, app: &App, size: banner::Size) {
     let theme = &app.theme;
     let snap = &app.snapshot;
-    let [left, right] =
-        Layout::horizontal([Constraint::Length(size.left_width()), Constraint::Min(0)]).areas(area);
 
-    // Left: the name in the accent colour (spaced out when compact, in big letters when
-    // there is room), with the date line underneath.
+    // Middle: the name in the accent colour (spaced out when compact, in big letters when
+    // there is room), centred across the whole banner.
     let title_style = Style::default()
         .fg(tc(theme.accent))
         .add_modifier(Modifier::BOLD);
-    let mut left_lines: Vec<Line> = match size {
-        banner::Size::Compact => vec![Line::from(Span::styled(
-            format!(" {}", banner::NAME),
-            title_style,
-        ))],
+    let title_lines: Vec<Line> = match size {
+        banner::Size::Compact => vec![Line::from(Span::styled(banner::NAME, title_style))],
         banner::Size::Big => banner::BIG_TITLE
             .iter()
-            .map(|row| Line::from(Span::styled(format!(" {row}"), title_style)))
+            .map(|row| Line::from(Span::styled(*row, title_style)))
             .collect(),
     };
-    left_lines.push(Line::styled(
-        format!(" {}", banner::date_line(snap.today)),
-        Style::default().fg(tc(theme.fg)),
-    ));
-    frame.render_widget(Paragraph::new(left_lines), left);
+    let title_w = size.title_width().min(area.width);
+    let title_area = Rect::new(
+        area.x + banner::centred_x(area.width, title_w),
+        area.y,
+        title_w,
+        title_lines.len() as u16,
+    );
+    frame.render_widget(Paragraph::new(title_lines), title_area);
+
+    // Left: the date line on the banner's last row, where it has always been (directly
+    // under the name in the compact banner, level with the chart's labels in the big one).
+    let date_area = Rect::new(
+        area.x,
+        area.y + area.height.saturating_sub(1),
+        banner::LEFT_WIDTH.min(area.width),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!(" {}", banner::date_line(snap.today)),
+            Style::default().fg(tc(theme.fg)),
+        )),
+        date_area,
+    );
 
     // Right: the sparkline, if the terminal is wide enough for it.
-    let per_hour = banner::columns_per_hour(area.width, size.left_width());
+    let per_hour = banner::columns_per_hour(area.width, size.title_width());
     if per_hour == 0 {
         return;
     }
@@ -330,12 +345,16 @@ fn draw_banner(frame: &mut Frame, area: Rect, app: &App, size: banner::Size) {
         bars.push(Span::styled(glyph, style));
     }
     let axis = Line::styled(banner::axis_line(per_hour), app.muted());
-    // The chart and its hour labels sit on the bottom two rows, level with the date line;
-    // in the compact banner that is the whole area.
-    let mut rows: Vec<Line> = vec![Line::from(""); (area.height as usize).saturating_sub(2)];
-    rows.push(Line::from(bars));
-    rows.push(axis);
-    frame.render_widget(Paragraph::new(rows), right);
+    // The chart and its hour labels sit on the bottom two rows (level with the date line),
+    // pushed against the right edge.
+    let chart_w = 24 * per_hour as u16;
+    let chart_area = Rect::new(
+        area.x + banner::chart_x(area.width, chart_w),
+        area.y + area.height.saturating_sub(2),
+        chart_w,
+        2.min(area.height),
+    );
+    frame.render_widget(Paragraph::new(vec![Line::from(bars), axis]), chart_area);
 }
 
 /// The tab bar with the period's total on the right.
@@ -1258,6 +1277,37 @@ mod tests {
         // At 31 rows it drops to the compact banner.
         let compact = render(&app, 120, 31);
         assert!(compact.contains("t i m e s i n k") && !compact.contains("| |_ _ _ __"));
+    }
+
+    #[test]
+    fn banner_parts_sit_left_centre_and_right() {
+        let app = sample_app(View::Today);
+        for width in [120u16, 160] {
+            let screen = render(&app, width, 40);
+            let lines: Vec<Vec<char>> = screen.lines().map(|l| l.chars().collect()).collect();
+            let find = |row: usize, text: &str| -> Option<usize> {
+                let hay: String = lines[row].iter().collect();
+                hay.find(text).map(|byte| hay[..byte].chars().count())
+            };
+            // The big title is centred across the whole width.
+            let title_x = find(1, "| | (_)").unwrap();
+            assert_eq!(title_x, (width as usize - 40) / 2, "{width}\n{screen}");
+            // The date stays at the left edge, on the row under the title.
+            assert_eq!(find(6, "Saturday"), Some(1), "{width}\n{screen}");
+            // The hour labels end at the right edge (one-column margin), beside the date.
+            let axis: String = lines[6].iter().collect();
+            let end = axis.trim_end().chars().count();
+            assert_eq!(end, width as usize - 1, "{width}\n{screen}");
+            assert!(axis.trim_end().ends_with("24"), "{width}\n{screen}");
+            // And the chart never touches the title's rows horizontally.
+            let title_end = title_x + 40;
+            let bars: String = lines[5].iter().collect();
+            let first_bar = bars.chars().position(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
+            assert!(first_bar >= title_end + 2, "{width}\n{screen}");
+        }
+        // Too narrow for the chart beside a centred title: it drops out rather than overlap.
+        let screen = render(&app, 90, 40);
+        assert!(!screen.lines().nth(5).unwrap().contains('▁'), "{screen}");
     }
 
     #[test]
