@@ -121,11 +121,11 @@ pub fn collect(
 ) -> Result<ReportData> {
     let today = stats::local_day(now, tz);
     let from = stats::day_start_utc(today - (days.max(1) - 1), tz);
-    let intervals = db.intervals_between(from, now + 1)?;
-    let listening = db.listening_between(from, now + 1)?;
+    let intervals = db.intervals_between(from, now + 1, None)?;
+    let listening = db.listening_between(from, now + 1, None)?;
     let report = ReportData::build(&intervals, &listening, map, days, now, tz);
     // Website time, only when the browser extension has recorded some.
-    let sites = db.domains_between(from, now + 1)?;
+    let sites = db.domains_between(from, now + 1, None)?;
     if sites.is_empty() {
         return Ok(report);
     }
@@ -227,7 +227,7 @@ pub fn run_demo(days: i64, seed: u64, now: i64, tz: &dyn Fn(i64) -> i64) -> Resu
     let path = paths::db_path()?;
     let db = Db::open(&path, &paths::device_id())?;
     // Never pile demo data on top of existing rows (a second run would double everything).
-    if !db.intervals_between(0, now + 1)?.is_empty() {
+    if !db.intervals_between(0, now + 1, None)?.is_empty() {
         bail!(
             "the sandbox database already has data; reset it first (sh contrib/sandbox.sh reset)"
         );

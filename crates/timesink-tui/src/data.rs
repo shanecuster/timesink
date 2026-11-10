@@ -229,12 +229,12 @@ impl Snapshot {
         tz: &dyn Fn(i64) -> i64,
     ) -> Result<()> {
         let from = stats::day_start_utc(self.today - (self.days.len() as i64 - 1), tz);
-        let rows = db.domains_between(from, now + 1)?;
+        let rows = db.domains_between(from, now + 1, None)?;
         if rows.is_empty() {
             self.sites.clear();
             return Ok(());
         }
-        let intervals = db.intervals_between(from, now + 1)?;
+        let intervals = db.intervals_between(from, now + 1, None)?;
         let spans = site_spans(&rows, &intervals, config);
         self.sites = site_totals(&spans, config, from, now + 1);
         Ok(())
@@ -261,7 +261,7 @@ impl Snapshot {
         // Read from the start of the first day to now.
         let from = stats::day_start_utc(first, tz);
         let spans: Vec<Span> = db
-            .intervals_between(from, now + 1)?
+            .intervals_between(from, now + 1, None)?
             .into_iter()
             .map(|i| Span {
                 start: i.start_ts,
@@ -270,7 +270,7 @@ impl Snapshot {
             })
             .collect();
         let listening: Vec<Span> = db
-            .listening_between(from, now + 1)?
+            .listening_between(from, now + 1, None)?
             .into_iter()
             .map(|(player, start, end)| Span {
                 start,

@@ -15,7 +15,7 @@ use crate::tracker::Effect;
 
 /// Version of the database layout. Bump it and add a migration step when the
 /// layout changes. Stored in SQLite's built-in `user_version` field.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// Intervals shorter than this many seconds are deleted when they close.
 /// This drops the flicker from quickly passing over windows.
@@ -127,6 +127,57 @@ impl Db {
             // Existing rows get '' (unknown source).
             conn.execute_batch("ALTER TABLE domains ADD COLUMN source TEXT NOT NULL DEFAULT '';")?;
         }
+        if version < 5 {
+            // Version 5 prepares syncing with CouchDB (see `syncdoc`). `sync_dirty` lists the
+            // UTC days whose rows from THIS computer changed since they were last uploaded;
+            // triggers keep it up to date whatever code writes the rows. `sync_docs` remembers
+            // the CouchDB revision of each uploaded day, and `sync_state` holds small values
+            // (this computer's name for the triggers, the last change number downloaded).
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_dirty (day INTEGER PRIMARY KEY);
+                 CREATE TABLE IF NOT EXISTS sync_docs (doc_id TEXT PRIMARY KEY, rev TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )?;
+            for table in ["intervals", "listening", "domains"] {
+                // Only rows this computer recorded are marked; other computers' rows (once
+                // downloaded) are never uploaded. The marks are made by triggers.
+                conn.execute_batch(&format!(
+                    "CREATE TRIGGER IF NOT EXISTS {table}_sync_ins AFTER INSERT ON {table}
+                     WHEN NEW.device_id = (SELECT value FROM sync_state WHERE key = 'device')
+                     BEGIN INSERT OR IGNORE INTO sync_dirty (day) VALUES (NEW.start_ts / 86400); END;
+                     CREATE TRIGGER IF NOT EXISTS {table}_sync_upd AFTER UPDATE ON {table}
+                     WHEN NEW.device_id = (SELECT value FROM sync_state WHERE key = 'device')
+                     BEGIN
+                         INSERT OR IGNORE INTO sync_dirty (day) VALUES (NEW.start_ts / 86400);
+                         INSERT OR IGNORE INTO sync_dirty (day) VALUES (OLD.start_ts / 86400);
+                     END;
+                     CREATE TRIGGER IF NOT EXISTS {table}_sync_del AFTER DELETE ON {table}
+                     WHEN OLD.device_id = (SELECT value FROM sync_state WHERE key = 'device')
+                     BEGIN INSERT OR IGNORE INTO sync_dirty (day) VALUES (OLD.start_ts / 86400); END;"
+                ))?;
+            }
+            // Everything already recorded here has never been uploaded.
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('device', ?1)",
+                [device_id],
+            )?;
+            for table in ["intervals", "listening", "domains"] {
+                conn.execute(
+                    &format!(
+                        "INSERT OR IGNORE INTO sync_dirty (day)
+                         SELECT DISTINCT start_ts / 86400 FROM {table} WHERE device_id = ?1"
+                    ),
+                    [device_id],
+                )?;
+            }
+        }
+        // The triggers compare against this computer's name, so keep it current (written
+        // only when it changed, so opening the database stays a read most of the time).
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('device', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
+            [device_id],
+        )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
             conn,
@@ -329,13 +380,19 @@ impl Db {
 impl Db {
     /// All focus rows that overlap `[from_ts, to_ts)`, oldest first.
     /// Rows are returned whole; callers clip them to the range.
-    pub fn intervals_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<StoredInterval>> {
+    pub fn intervals_between(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        device: Option<&str>,
+    ) -> Result<Vec<StoredInterval>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, device_id, start_ts, end_ts, app_class, title, workspace
              FROM intervals WHERE end_ts > ?1 AND start_ts < ?2
+               AND (?3 IS NULL OR device_id = ?3)
              ORDER BY start_ts, id",
         )?;
-        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+        let rows = stmt.query_map(params![from_ts, to_ts, device], |row| {
             Ok(StoredInterval {
                 id: row.get(0)?,
                 device_id: row.get(1)?,
@@ -352,16 +409,203 @@ impl Db {
 
     /// All listening rows that overlap `[from_ts, to_ts)` as
     /// (player, start, end), oldest first.
-    pub fn listening_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
+    pub fn listening_between(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        device: Option<&str>,
+    ) -> Result<Vec<(String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT player, start_ts, end_ts FROM listening
-             WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+             WHERE end_ts > ?1 AND start_ts < ?2 AND (?3 IS NULL OR device_id = ?3)
+             ORDER BY start_ts, id",
         )?;
-        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+        let rows = stmt.query_map(params![from_ts, to_ts, device], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("reading listening rows")
+    }
+}
+
+/// Methods used by syncing with CouchDB (see `syncdoc` for the document format).
+impl Db {
+    /// This computer's name, as stored on the rows it records.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Every computer that has rows in this database, sorted by name.
+    pub fn devices(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id FROM intervals UNION SELECT device_id FROM listening
+             UNION SELECT device_id FROM domains ORDER BY 1",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .context("listing devices")
+    }
+
+    /// Remove and return the UTC days whose rows from this computer changed since they
+    /// were last uploaded. Clearing the marks BEFORE reading the rows means a change made
+    /// while uploading marks its day again instead of being lost; if the upload fails the
+    /// caller puts the marks back with `mark_dirty`.
+    pub fn take_dirty_days(&self) -> Result<Vec<i64>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let days: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT day FROM sync_dirty ORDER BY day")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<i64>>>()?
+        };
+        tx.execute("DELETE FROM sync_dirty", [])?;
+        tx.commit()?;
+        Ok(days)
+    }
+
+    /// Mark a day as needing upload.
+    pub fn mark_dirty(&self, day: i64) -> Result<()> {
+        self.conn
+            .execute("INSERT OR IGNORE INTO sync_dirty (day) VALUES (?1)", [day])?;
+        Ok(())
+    }
+
+    /// How many days are waiting to be uploaded.
+    pub fn dirty_count(&self) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sync_dirty", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// This computer's rows that started on the given UTC day.
+    pub fn day_rows(&self, day: i64) -> Result<crate::syncdoc::DayRows> {
+        use crate::syncdoc::{DayRows, DAY_SECS};
+        let (from, to) = (day * DAY_SECS, (day + 1) * DAY_SECS);
+        let mut rows = DayRows::default();
+        let mut stmt = self.conn.prepare(
+            "SELECT start_ts, end_ts, app_class, workspace FROM intervals
+             WHERE device_id = ?1 AND start_ts >= ?2 AND start_ts < ?3 ORDER BY start_ts, id",
+        )?;
+        rows.intervals = stmt
+            .query_map(params![self.device_id, from, to], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT start_ts, end_ts, player FROM listening
+             WHERE device_id = ?1 AND start_ts >= ?2 AND start_ts < ?3 ORDER BY start_ts, id",
+        )?;
+        rows.listening = stmt
+            .query_map(params![self.device_id, from, to], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT start_ts, end_ts, domain FROM domains
+             WHERE device_id = ?1 AND start_ts >= ?2 AND start_ts < ?3 ORDER BY start_ts, id",
+        )?;
+        rows.domains = stmt
+            .query_map(params![self.device_id, from, to], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Replace another computer's rows for one UTC day with the downloaded ones, in one
+    /// transaction. Titles are blank (they are never synced). The rows are closed, so
+    /// nothing here is ever extended or merged by the local tracker. Refuses to touch this
+    /// computer's own rows. Passing an empty `DayRows` removes the day.
+    pub fn replace_day(
+        &self,
+        device: &str,
+        day: i64,
+        rows: &crate::syncdoc::DayRows,
+    ) -> Result<()> {
+        use crate::syncdoc::DAY_SECS;
+        if device == self.device_id {
+            anyhow::bail!("refusing to overwrite this computer's own rows with a download");
+        }
+        let (from, to) = (day * DAY_SECS, (day + 1) * DAY_SECS);
+        let tx = self.conn.unchecked_transaction()?;
+        for table in ["intervals", "listening", "domains"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE device_id = ?1 AND start_ts >= ?2 AND start_ts < ?3"
+                ),
+                params![device, from, to],
+            )?;
+        }
+        for (start, end, app, workspace) in &rows.intervals {
+            tx.execute(
+                "INSERT INTO intervals (device_id, start_ts, end_ts, app_class, title, workspace)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                params![device, start, end, app, workspace],
+            )?;
+        }
+        for (start, end, player) in &rows.listening {
+            tx.execute(
+                "INSERT INTO listening (device_id, start_ts, end_ts, player)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![device, start, end, player],
+            )?;
+        }
+        for (start, end, site) in &rows.domains {
+            tx.execute(
+                "INSERT INTO domains (device_id, start_ts, end_ts, domain, closed, source)
+                 VALUES (?1, ?2, ?3, ?4, 1, 'sync')",
+                params![device, start, end, site],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The CouchDB revision last seen for a document, if any.
+    pub fn doc_rev(&self, doc_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rev FROM sync_docs WHERE doc_id = ?1")?;
+        let mut rows = stmt.query([doc_id])?;
+        match rows.next()? {
+            Some(r) => Ok(Some(r.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Remember a document's latest revision; `None` forgets it.
+    pub fn set_doc_rev(&self, doc_id: &str, rev: Option<&str>) -> Result<()> {
+        match rev {
+            Some(rev) => self.conn.execute(
+                "INSERT OR REPLACE INTO sync_docs (doc_id, rev) VALUES (?1, ?2)",
+                params![doc_id, rev],
+            )?,
+            None => self
+                .conn
+                .execute("DELETE FROM sync_docs WHERE doc_id = ?1", [doc_id])?,
+        };
+        Ok(())
+    }
+
+    /// A small stored value (for example the last CouchDB change number downloaded).
+    pub fn sync_state(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM sync_state WHERE key = ?1")?;
+        let mut rows = stmt.query([key])?;
+        match rows.next()? {
+            Some(r) => Ok(Some(r.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Store a small value for syncing.
+    pub fn set_sync_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
     }
 }
 
@@ -444,12 +688,18 @@ impl Db {
     }
 
     /// All site stretches that overlap `[from_ts, to_ts)` as (site, start, end), oldest first.
-    pub fn domains_between(&self, from_ts: i64, to_ts: i64) -> Result<Vec<(String, i64, i64)>> {
+    pub fn domains_between(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        device: Option<&str>,
+    ) -> Result<Vec<(String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT domain, start_ts, end_ts FROM domains
-             WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+             WHERE end_ts > ?1 AND start_ts < ?2 AND (?3 IS NULL OR device_id = ?3)
+             ORDER BY start_ts, id",
         )?;
-        let rows = stmt.query_map(params![from_ts, to_ts], |row| {
+        let rows = stmt.query_map(params![from_ts, to_ts, device], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1136,10 +1386,10 @@ mod listening_tests {
             .unwrap();
         r.apply_listen(&[open(500, "b"), ListenEffect::Closed { end_ts: 600 }])
             .unwrap();
-        let rows = r.db().listening_between(150, 300).unwrap();
+        let rows = r.db().listening_between(150, 300, None).unwrap();
         assert_eq!(rows, vec![("a".to_string(), 100, 200)]);
-        assert_eq!(r.db().listening_between(0, 1000).unwrap().len(), 2);
-        assert!(r.db().intervals_between(0, 1000).unwrap().is_empty());
+        assert_eq!(r.db().listening_between(0, 1000, None).unwrap().len(), 2);
+        assert!(r.db().intervals_between(0, 1000, None).unwrap().is_empty());
     }
 
     #[test]
@@ -1153,7 +1403,7 @@ mod listening_tests {
         db.record_domain(220, None, "a").unwrap();
         // The same site again after a "none" starts a fresh stretch, not a bridge.
         db.record_domain(250, Some("wikipedia.org"), "a").unwrap();
-        let rows = db.domains_between(0, 1000).unwrap();
+        let rows = db.domains_between(0, 1000, None).unwrap();
         assert_eq!(
             rows,
             vec![
@@ -1171,7 +1421,7 @@ mod listening_tests {
         db.record_domain(130, Some("github.com"), "a").unwrap();
         // The extension went quiet (browser closed, machine asleep) for 10 minutes.
         db.record_domain(730, Some("github.com"), "a").unwrap();
-        let rows = db.domains_between(0, 2000).unwrap();
+        let rows = db.domains_between(0, 2000, None).unwrap();
         assert_eq!(rows[0], ("github.com".to_string(), 100, 130));
         assert_eq!(rows[1].1, 730);
     }
@@ -1182,9 +1432,9 @@ mod listening_tests {
         db.record_domain(10, Some("a.com"), "a").unwrap();
         db.record_domain(50, Some("b.com"), "a").unwrap();
         assert_eq!(db.forget_domains(Some("a.com")).unwrap(), 1);
-        assert_eq!(db.domains_between(0, 100).unwrap().len(), 1);
+        assert_eq!(db.domains_between(0, 100, None).unwrap().len(), 1);
         assert_eq!(db.forget_domains(None).unwrap(), 1);
-        assert!(db.domains_between(0, 100).unwrap().is_empty());
+        assert!(db.domains_between(0, 100, None).unwrap().is_empty());
     }
 
     #[test]
@@ -1198,13 +1448,13 @@ mod listening_tests {
         db.record_domain(160, Some("github.com"), "a").unwrap();
         // One unbroken stretch from A.
         assert_eq!(
-            db.domains_between(0, 1000).unwrap(),
+            db.domains_between(0, 1000, None).unwrap(),
             vec![("github.com".to_string(), 100, 160)]
         );
         // B then takes over while A goes quiet.
         db.record_domain(170, None, "a").unwrap();
         db.record_domain(170, Some("wikipedia.org"), "b").unwrap();
-        let rows = db.domains_between(0, 1000).unwrap();
+        let rows = db.domains_between(0, 1000, None).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].0, "wikipedia.org");
         assert_eq!(
@@ -1238,11 +1488,165 @@ mod listening_tests {
         let db = Db::open(&path, "box").unwrap();
         assert!(dir.join("t.db.bak-v3").exists());
         assert_eq!(
-            db.domains_between(0, 1000).unwrap(),
+            db.domains_between(0, 1000, None).unwrap(),
             vec![("github.com".to_string(), 100, 160)]
         );
         db.record_domain(500, Some("a.com"), "x").unwrap();
-        assert_eq!(db.domains_between(0, 1000).unwrap().len(), 2);
+        assert_eq!(db.domains_between(0, 1000, None).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A database for the computer called `name`, with the schema applied.
+    fn named(name: &str) -> Db {
+        Db::open_in_memory(name).unwrap()
+    }
+
+    #[test]
+    fn own_changes_mark_their_day_but_downloads_do_not() {
+        use crate::syncdoc::{DayRows, DAY_SECS};
+        let db = named("mangrove");
+        assert_eq!(db.take_dirty_days().unwrap(), Vec::<i64>::new());
+
+        // Recording something marks its UTC day.
+        let snap = WindowSnapshot {
+            app_class: "zen".into(),
+            title: String::new(),
+            workspace: "1".into(),
+        };
+        let id = db.insert_open(3 * DAY_SECS + 50, &snap).unwrap();
+        assert_eq!(db.take_dirty_days().unwrap(), vec![3]);
+        // Taking clears them; extending the row marks the day again.
+        assert!(db.take_dirty_days().unwrap().is_empty());
+        db.set_end(id, 3 * DAY_SECS + 90).unwrap();
+        assert_eq!(db.take_dirty_days().unwrap(), vec![3]);
+
+        // Listening and site rows mark their days too.
+        db.insert_listen_open(5 * DAY_SECS, "spotify").unwrap();
+        db.record_domain(7 * DAY_SECS, Some("github.com"), "a")
+            .unwrap();
+        assert_eq!(db.take_dirty_days().unwrap(), vec![5, 7]);
+
+        // Deleting (forgetting) marks the day as changed.
+        db.forget_domains(None).unwrap();
+        assert_eq!(db.take_dirty_days().unwrap(), vec![7]);
+
+        // Another computer's downloaded rows never mark anything (so uploads cannot echo).
+        let rows = DayRows {
+            intervals: vec![(9 * DAY_SECS, 9 * DAY_SECS + 60, "steam".into(), "1".into())],
+            listening: vec![(9 * DAY_SECS, 9 * DAY_SECS + 60, "spotify".into())],
+            domains: vec![(9 * DAY_SECS, 9 * DAY_SECS + 60, "gog.com".into())],
+        };
+        db.replace_day("deck", 9, &rows).unwrap();
+        assert!(db.take_dirty_days().unwrap().is_empty());
+        db.replace_day("deck", 9, &DayRows::default()).unwrap();
+        assert!(db.take_dirty_days().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacing_a_day_swaps_only_that_computers_rows_for_that_day() {
+        use crate::syncdoc::{DayRows, DAY_SECS};
+        let db = named("mangrove");
+        let snap = WindowSnapshot {
+            app_class: "zen".into(),
+            title: String::new(),
+            workspace: "1".into(),
+        };
+        db.insert_open(10 * DAY_SECS, &snap).unwrap();
+        let day = |n: i64, app: &str| DayRows {
+            intervals: vec![(n * DAY_SECS + 5, n * DAY_SECS + 65, app.into(), "2".into())],
+            ..DayRows::default()
+        };
+        db.replace_day("deck", 10, &day(10, "steam")).unwrap();
+        db.replace_day("deck", 11, &day(11, "steam")).unwrap();
+        db.replace_day("laptop", 10, &day(10, "kitty")).unwrap();
+        // A second download of the same day replaces, it does not add.
+        db.replace_day("deck", 10, &day(10, "heroic")).unwrap();
+
+        let all = db.intervals_between(0, 20 * DAY_SECS, None).unwrap();
+        let apps: Vec<(&str, &str)> = all
+            .iter()
+            .map(|r| (r.device_id.as_str(), r.app_class.as_str()))
+            .collect();
+        assert_eq!(
+            apps,
+            vec![
+                ("mangrove", "zen"),
+                // Same start time as the deck's: the older row (laptop) comes first.
+                ("laptop", "kitty"),
+                ("deck", "heroic"),
+                ("deck", "steam")
+            ]
+        );
+        // Downloaded rows carry no title, and the device filter works.
+        assert!(all
+            .iter()
+            .filter(|r| r.device_id == "deck")
+            .all(|r| r.title.is_empty()));
+        let deck = db
+            .intervals_between(0, 20 * DAY_SECS, Some("deck"))
+            .unwrap();
+        assert_eq!(deck.len(), 2);
+        assert_eq!(db.devices().unwrap(), vec!["deck", "laptop", "mangrove"]);
+        // Own rows are never overwritten by a download.
+        assert!(db.replace_day("mangrove", 10, &day(10, "x")).is_err());
+        // day_rows returns only this computer's rows for that day.
+        let mine = db.day_rows(10).unwrap();
+        assert_eq!(mine.intervals.len(), 1);
+        assert_eq!(mine.intervals[0].2, "zen");
+    }
+
+    #[test]
+    fn revisions_and_state_are_remembered() {
+        let db = named("mangrove");
+        assert_eq!(db.doc_rev("day:mangrove:2026-11-10").unwrap(), None);
+        db.set_doc_rev("day:mangrove:2026-11-10", Some("1-a"))
+            .unwrap();
+        db.set_doc_rev("day:mangrove:2026-11-10", Some("2-b"))
+            .unwrap();
+        assert_eq!(
+            db.doc_rev("day:mangrove:2026-11-10").unwrap().as_deref(),
+            Some("2-b")
+        );
+        db.set_doc_rev("day:mangrove:2026-11-10", None).unwrap();
+        assert_eq!(db.doc_rev("day:mangrove:2026-11-10").unwrap(), None);
+        assert_eq!(db.sync_state("seq").unwrap(), None);
+        db.set_sync_state("seq", "12-xyz").unwrap();
+        assert_eq!(db.sync_state("seq").unwrap().as_deref(), Some("12-xyz"));
+        db.mark_dirty(4).unwrap();
+        db.mark_dirty(4).unwrap();
+        assert_eq!(db.dirty_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_v4_database_gets_sync_tables_backup_and_marks_old_days() {
+        let dir = std::env::temp_dir().join(format!("timesink-v4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE intervals (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
+                     app_class TEXT NOT NULL, title TEXT NOT NULL, workspace TEXT NOT NULL);
+                 CREATE TABLE listening (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, player TEXT NOT NULL);
+                 CREATE TABLE domains (id INTEGER PRIMARY KEY, device_id TEXT NOT NULL,
+                     start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, domain TEXT NOT NULL,
+                     closed INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '');
+                 INSERT INTO intervals VALUES (1,'box',86500,86560,'zen','t','1');
+                 INSERT INTO intervals VALUES (2,'box',260000,260060,'zen','t','1');
+                 INSERT INTO intervals VALUES (3,'other',500000,500060,'zen','t','1');
+                 INSERT INTO listening VALUES (1,'box',432000,432060,'spotify');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+        let db = Db::open(&path, "box").unwrap();
+        assert!(dir.join("t.db.bak-v4").exists());
+        // Every old day of THIS computer is waiting for its first upload; others are not.
+        assert_eq!(db.take_dirty_days().unwrap(), vec![1, 3, 5]);
+        assert_eq!(db.intervals_between(0, 10_000_000, None).unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
