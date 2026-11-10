@@ -7,6 +7,7 @@ mod commands;
 mod data;
 mod export;
 mod palette;
+mod sync;
 mod ui;
 
 use std::cell::Cell;
@@ -97,6 +98,10 @@ fn start() -> Result<()> {
         cli::Command::Backup { out } => {
             let file = commands::run_backup(&db, out.as_deref(), now_ts(), &local_offset)?;
             println!("Backup written to {}", file.display());
+            Ok(())
+        }
+        cli::Command::Sync { status } => {
+            println!("{}", commands::run_sync(&db, status)?);
             Ok(())
         }
         // Handled before the database was opened; listed so the match stays complete.

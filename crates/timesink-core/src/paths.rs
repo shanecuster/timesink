@@ -85,6 +85,12 @@ pub fn apps_conf_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("apps.conf"))
 }
 
+/// Where `sync.conf` lives: the CouchDB address and login. It holds a password, so it is
+/// only ever read from here and should be readable by you alone (`chmod 600`).
+pub fn sync_conf_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("sync.conf"))
+}
+
 /// Load `domains.conf` (browser class, blocked sites, site names and categories). Without
 /// the file the defaults apply: the browser is `zen`, nothing is blocked.
 pub fn load_domain_config() -> Result<crate::domains::DomainConfig> {

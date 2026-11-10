@@ -4,6 +4,7 @@
 //! timesink                      open the interface
 //! timesink export [options]     write a report file
 //! timesink backup [--out PATH]  copy the database
+//! timesink sync [status]        sync with CouchDB (or show its state)
 //! ```
 
 use std::path::PathBuf;
@@ -31,6 +32,11 @@ pub enum Command {
         /// Where to write; the default folder is used when absent.
         out: Option<PathBuf>,
     },
+    /// Sync this computer's rows with CouchDB, or (with `status`) just describe the setup.
+    Sync {
+        /// Only show the state; do not contact the server.
+        status: bool,
+    },
     /// Fill an empty sandbox database with made-up data (refused outside the sandbox).
     DemoData {
         /// How many days to make, ending today.
@@ -50,6 +56,9 @@ USAGE
   timesink                         open the interface
   timesink export [options]        write a report file
   timesink backup [--out PATH]     copy the database (safe while the daemon runs)
+  timesink sync                    upload this computer's days to CouchDB and download
+                                   the other computers' (needs ~/.config/timesink/sync.conf)
+  timesink sync status             show the sync setup and what is waiting (offline)
 
 EXPORT OPTIONS
   -f, --format FORMAT   csv, json, md or html           (default: html)
@@ -60,7 +69,7 @@ EXPORT OPTIONS
 
 SANDBOX
   timesink demo-data [--days N] [--seed N]   fill an empty sandbox database with
-                                              made-up data (see contrib/sandbox.fish)
+                                              made-up data (see contrib/sandbox.sh)
 
 Files go to ~/Documents/timesink-exports unless --out is given.
 CSV and JSON include every recorded row; md and html are summaries.
@@ -77,6 +86,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "export" => parse_export(&args[1..]),
         "backup" => parse_backup(&args[1..]),
         "demo-data" => parse_demo(&args[1..]),
+        "sync" => match args.get(1).map(String::as_str) {
+            None => Ok(Command::Sync { status: false }),
+            Some("status") if args.len() == 2 => Ok(Command::Sync { status: true }),
+            Some(other) => Err(format!(
+                "unknown sync option '{other}' (use: timesink sync, or timesink sync status)"
+            )),
+        },
         other => Err(format!("unknown command '{other}' (try: timesink --help)")),
     }
 }

@@ -21,6 +21,6 @@ chrono = "0.4"
 # serde_json: writes the JSON export with correct escaping.
 serde_json = "1"
 # ureq: a small blocking HTTP client for talking to CouchDB (`timesink sync`).
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 # base64: the "Authorization: Basic" header for CouchDB.
 base64 = "0.22"

@@ -1,0 +1,17 @@
+# Copy to ~/.config/timesink/sync.conf and fill in your own values, then run:
+#   chmod 600 ~/.config/timesink/sync.conf
+#   timesink sync status      (shows the setup, contacts nothing)
+#   timesink sync             (uploads this computer's days, downloads the others')
+#
+# This file holds a password. Keep it out of git and out of any shared folder.
+
+# Where your CouchDB lives (http:// or https://, with the port if it is not 80/443).
+url = http://your-couchdb-host:5984
+
+# The database to use (lowercase letters, digits and _$()+- only). Created if missing,
+# when the user below is allowed to create databases.
+database = timesink
+
+# A CouchDB user that can read and write that database.
+user = timesink
+password = change-me

@@ -260,6 +260,50 @@ pub fn run_demo(days: i64, seed: u64, now: i64, tz: &dyn Fn(i64) -> i64) -> Resu
     ))
 }
 
+/// `timesink sync`: upload this computer's changed days and download the others'.
+/// With `status_only` nothing is sent; the setup and what is waiting are described.
+pub fn run_sync(db: &Db, status_only: bool) -> Result<String> {
+    use crate::sync::{self, HttpRemote, SyncConfig};
+    let path = paths::sync_conf_path()?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no sync settings at {} (see contrib/sync.conf.example)",
+            path.display()
+        )
+    })?;
+    let config = SyncConfig::parse(&text).with_context(|| format!("reading {}", path.display()))?;
+    // The file holds a password, so mention it when others could read it.
+    let mut out = String::new();
+    if let Some(warning) = sync::permission_warning(&path) {
+        out.push_str(&format!("warning: {warning}\n"));
+    }
+    if status_only {
+        let devices = db.devices()?;
+        out.push_str(&format!(
+            "settings:   {}\nserver:     {}  database: {}  user: {}\nthis device: {}\ndevices here: {}\nwaiting to upload: {} day(s)\nlast change number: {}",
+            path.display(),
+            config.url,
+            config.database,
+            config.user,
+            db.device_id(),
+            devices.join(", "),
+            db.dirty_count()?,
+            db.sync_state("seq")?.unwrap_or_else(|| "none yet".into()),
+        ));
+        return Ok(out);
+    }
+    let mut remote = HttpRemote::new(config);
+    let report = sync::run(db, &mut remote)?;
+    out.push_str(&format!(
+        "Uploaded {} day(s), removed {} from the server, downloaded {} day(s) from other devices.",
+        report.uploaded, report.removed, report.downloaded
+    ));
+    for warning in &report.warnings {
+        out.push_str(&format!("\nwarning: {warning}"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
