@@ -9,14 +9,75 @@
 //!  t i m e s i n k                          ▁▁▂▅▇█▇▆▅▇█▆▃▂▁▁▁
 //!  Saturday November 07 2026 · Week 45      00   06   12   18   24
 //! ```
+//!
+//! On tall terminals the name is drawn large instead (the figlet font "big"), with the date
+//! line under it and the chart beside the bottom of it.
 
 use chrono::{DateTime, Datelike};
 
-/// The banner is two rows tall.
+/// The compact banner is two rows tall.
 pub const HEIGHT: u16 = 2;
 
 /// Below this many terminal rows the banner hides itself so the charts keep their room.
 pub const MIN_TERMINAL_HEIGHT: u16 = 24;
+
+/// The large banner: six rows of title plus the date line.
+pub const BIG_HEIGHT: u16 = 7;
+
+/// Terminals at least this tall get the large banner; shorter ones get the compact one.
+pub const BIG_MIN_TERMINAL_HEIGHT: u16 = 32;
+
+/// The large title: "timesink" in the figlet font "big" (trailing blank rows removed).
+/// Every row is at most 40 columns wide.
+pub const BIG_TITLE: [&str; 6] = [
+    r" _   _                     _       _    ",
+    r"| | (_)                   (_)     | |   ",
+    r"| |_ _ _ __ ___   ___  ___ _ _ __ | | __",
+    r"| __| | '_ ` _ \ / _ \/ __| | '_ \| |/ /",
+    r"| |_| | | | | | |  __/\__ \ | | | |   < ",
+    r" \__|_|_| |_| |_|\___||___/_|_| |_|_|\_\",
+];
+
+/// Width reserved on the left in the large banner: the title plus a space either side.
+pub const BIG_LEFT_WIDTH: u16 = 42;
+
+/// Which banner to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    /// Two rows: the spaced-out name and the date.
+    Compact,
+    /// Seven rows: the large title with the date under it.
+    Big,
+}
+
+impl Size {
+    /// The banner for a terminal this tall, or `None` when it is too short to spare the room.
+    pub fn for_terminal(height: u16) -> Option<Size> {
+        if height >= BIG_MIN_TERMINAL_HEIGHT {
+            Some(Size::Big)
+        } else if height >= MIN_TERMINAL_HEIGHT {
+            Some(Size::Compact)
+        } else {
+            None
+        }
+    }
+
+    /// Rows the banner takes.
+    pub fn height(self) -> u16 {
+        match self {
+            Size::Compact => HEIGHT,
+            Size::Big => BIG_HEIGHT,
+        }
+    }
+
+    /// Columns reserved on the left for the name and date.
+    pub fn left_width(self) -> u16 {
+        match self {
+            Size::Compact => LEFT_WIDTH,
+            Size::Big => BIG_LEFT_WIDTH,
+        }
+    }
+}
 
 /// Width reserved on the left for the name and the date line. The longest date
 /// ("Wednesday September 30 2026 · Week 40") fits with a space either side.
@@ -38,8 +99,8 @@ pub fn date_line(day: i64) -> String {
 
 /// How many terminal columns each hour gets in the chart for a given terminal width:
 /// 2 when there is plenty of room, 1 when it is tight, 0 when the chart does not fit.
-pub fn columns_per_hour(width: u16) -> usize {
-    let free = width.saturating_sub(LEFT_WIDTH) as usize;
+pub fn columns_per_hour(width: u16, left_width: u16) -> usize {
+    let free = width.saturating_sub(left_width) as usize;
     if free > 24 * 2 {
         2
     } else if free > 24 {
@@ -125,9 +186,12 @@ mod tests {
 
     #[test]
     fn columns_depend_on_width() {
-        assert_eq!(columns_per_hour(120), 2);
-        assert_eq!(columns_per_hour(80), 1);
-        assert_eq!(columns_per_hour(60), 0);
+        assert_eq!(columns_per_hour(120, LEFT_WIDTH), 2);
+        assert_eq!(columns_per_hour(80, LEFT_WIDTH), 1);
+        assert_eq!(columns_per_hour(60, LEFT_WIDTH), 0);
+        // The large banner reserves a little more room on the left.
+        assert_eq!(columns_per_hour(120, BIG_LEFT_WIDTH), 2);
+        assert_eq!(columns_per_hour(80, BIG_LEFT_WIDTH), 1);
     }
 
     #[test]
@@ -154,5 +218,26 @@ mod tests {
         assert_eq!(one.chars().count(), 24);
         assert_eq!(&one[6..8], "06");
         assert!(one.ends_with("24"));
+    }
+
+    #[test]
+    fn banner_size_depends_on_terminal_height() {
+        assert_eq!(Size::for_terminal(23), None);
+        assert_eq!(Size::for_terminal(24), Some(Size::Compact));
+        assert_eq!(Size::for_terminal(31), Some(Size::Compact));
+        assert_eq!(Size::for_terminal(32), Some(Size::Big));
+        assert_eq!(Size::Big.height(), BIG_HEIGHT);
+        assert_eq!(Size::Compact.left_width(), LEFT_WIDTH);
+    }
+
+    #[test]
+    fn the_big_title_fits_its_reserved_width() {
+        // Six rows, each narrower than the left block (which leaves a space either side).
+        assert_eq!(BIG_TITLE.len() as u16 + 1, BIG_HEIGHT);
+        for row in BIG_TITLE {
+            assert!(row.chars().count() < BIG_LEFT_WIDTH as usize - 1, "{row}");
+        }
+        // The date line fits under it too.
+        assert!(date_line(20_000).chars().count() < BIG_LEFT_WIDTH as usize);
     }
 }

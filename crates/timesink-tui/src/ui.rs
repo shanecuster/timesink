@@ -3,6 +3,8 @@
 //! `draw` only reads an `App` and paints a frame; it never touches the
 //! database. That keeps it easy to test with ratatui's in-memory backend.
 
+use std::cell::Cell;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -40,6 +42,81 @@ pub struct App {
     pub assign: Assign,
     /// Site categories from `domains.conf`, in order, for the Sites bar colours.
     pub site_categories: Vec<String>,
+    /// Which list is scrolled by the arrow keys, and how far each list is scrolled.
+    pub scroll: Scroll,
+    /// The furthest each list can scroll, written by `draw` so key presses can be kept in
+    /// range (indexed by `Panel::index`).
+    pub limits: Cell<[usize; 4]>,
+}
+
+/// The lists that can scroll when they hold more rows than fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    /// The Applications list.
+    Apps,
+    /// The Categories list.
+    Categories,
+    /// The Sites list (only when website time is recorded).
+    Sites,
+    /// The month-by-month table of the Year and All time views.
+    Months,
+}
+
+impl Panel {
+    /// Position in the per-panel arrays.
+    pub fn index(self) -> usize {
+        match self {
+            Panel::Apps => 0,
+            Panel::Categories => 1,
+            Panel::Sites => 2,
+            Panel::Months => 3,
+        }
+    }
+}
+
+/// How far each list is scrolled and which one the arrow keys move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scroll {
+    /// The list the scroll keys act on.
+    pub focus: Panel,
+    /// Rows scrolled off the top, per panel.
+    pub offsets: [usize; 4],
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Scroll {
+            focus: Panel::Apps,
+            offsets: [0; 4],
+        }
+    }
+}
+
+impl Scroll {
+    /// Move the focused list by `delta` rows, never past its first row or its last page.
+    pub fn by(&mut self, delta: isize, limits: [usize; 4]) {
+        let i = self.focus.index();
+        let max = limits[i];
+        self.offsets[i] = self.offsets[i].saturating_add_signed(delta).min(max);
+    }
+
+    /// Jump the focused list to its top (`false`) or its end (`true`).
+    pub fn jump(&mut self, to_end: bool, limits: [usize; 4]) {
+        let i = self.focus.index();
+        self.offsets[i] = if to_end { limits[i] } else { 0 };
+    }
+
+    /// Focus the next list that exists in the current view, wrapping round.
+    pub fn next_focus(&mut self, available: &[Panel]) {
+        if available.is_empty() {
+            return;
+        }
+        let at = available.iter().position(|p| *p == self.focus);
+        self.focus = match at {
+            Some(i) => available[(i + 1) % available.len()],
+            None => available[0],
+        };
+    }
 }
 
 /// A theme colour as a terminal colour.
@@ -97,6 +174,58 @@ impl App {
         Style::default().fg(tc(self.theme.muted))
     }
 
+    /// Work out which rows of a `len`-row list to show in a panel `rows` tall: the first row
+    /// shown and a title hint (`↑`, `↓3`) when some rows are hidden. Also records how far the
+    /// list can scroll so the key handler can stop at the end.
+    fn window(&self, panel: Panel, len: usize, rows: usize) -> (usize, String) {
+        let max = len.saturating_sub(rows);
+        let mut limits = self.limits.get();
+        limits[panel.index()] = max;
+        self.limits.set(limits);
+        let skip = self.scroll.offsets[panel.index()].min(max);
+        let mut hint = String::new();
+        if skip > 0 {
+            hint.push_str(" ↑");
+        }
+        let below = len.saturating_sub(skip + rows);
+        if below > 0 {
+            hint.push_str(&format!(" ↓{below}"));
+        }
+        (skip, hint)
+    }
+
+    /// A panel box like `block`, but with the accent colour on the border when this is the
+    /// list the scroll keys control *and* it has more rows than fit (so nothing changes
+    /// visually until scrolling matters).
+    fn list_block<'a>(
+        &self,
+        title: impl Into<Line<'a>>,
+        panel: Panel,
+        scrollable: bool,
+    ) -> Block<'a> {
+        let colour = if scrollable && self.scroll.focus == panel {
+            self.theme.accent
+        } else {
+            self.theme.border
+        };
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tc(colour)))
+            .title(title)
+    }
+
+    /// The lists that exist in the current view, in the order `p` visits them.
+    pub fn panels(&self) -> Vec<Panel> {
+        let mut out = vec![Panel::Apps, Panel::Categories];
+        if !self.snapshot.sites.is_empty() {
+            out.push(Panel::Sites);
+        }
+        if self.snapshot.view.by_month() {
+            out.push(Panel::Months);
+        }
+        out
+    }
+
     /// The colour of a category: its place in the config picks a slot in the current
     /// theme's own accent list, so it stays the same until the theme changes.
     pub fn color_of(&self, category: &str) -> Color {
@@ -116,11 +245,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
 
     // The banner only shows when switched on and when the terminal is tall enough.
-    let banner_h = if app.banner && area.height >= banner::MIN_TERMINAL_HEIGHT {
-        banner::HEIGHT
+    let banner_size = if app.banner {
+        banner::Size::for_terminal(area.height)
     } else {
-        0
+        None
     };
+    let banner_h = banner_size.map_or(0, banner::Size::height);
     let [banner_area, tabs_area, body, footer] = Layout::vertical([
         Constraint::Length(banner_h),
         Constraint::Length(3),
@@ -129,8 +259,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
 
-    if banner_h > 0 {
-        draw_banner(frame, banner_area, app);
+    if let Some(size) = banner_size {
+        draw_banner(frame, banner_area, app, size);
     }
     draw_tabs(frame, tabs_area, app);
     match app.snapshot.view {
@@ -147,28 +277,35 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// The title banner: name and date on the left, today's hour-by-hour sparkline on the right.
-fn draw_banner(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_banner(frame: &mut Frame, area: Rect, app: &App, size: banner::Size) {
     let theme = &app.theme;
     let snap = &app.snapshot;
     let [left, right] =
-        Layout::horizontal([Constraint::Length(banner::LEFT_WIDTH), Constraint::Min(0)])
-            .areas(area);
+        Layout::horizontal([Constraint::Length(size.left_width()), Constraint::Min(0)]).areas(area);
 
-    // Left: the spaced-out name in the accent colour, the date line underneath.
-    let name = Line::from(Span::styled(
-        format!(" {}", banner::NAME),
-        Style::default()
-            .fg(tc(theme.accent))
-            .add_modifier(Modifier::BOLD),
-    ));
-    let date = Line::styled(
+    // Left: the name in the accent colour (spaced out when compact, in big letters when
+    // there is room), with the date line underneath.
+    let title_style = Style::default()
+        .fg(tc(theme.accent))
+        .add_modifier(Modifier::BOLD);
+    let mut left_lines: Vec<Line> = match size {
+        banner::Size::Compact => vec![Line::from(Span::styled(
+            format!(" {}", banner::NAME),
+            title_style,
+        ))],
+        banner::Size::Big => banner::BIG_TITLE
+            .iter()
+            .map(|row| Line::from(Span::styled(format!(" {row}"), title_style)))
+            .collect(),
+    };
+    left_lines.push(Line::styled(
         format!(" {}", banner::date_line(snap.today)),
         Style::default().fg(tc(theme.fg)),
-    );
-    frame.render_widget(Paragraph::new(vec![name, date]), left);
+    ));
+    frame.render_widget(Paragraph::new(left_lines), left);
 
     // Right: the sparkline, if the terminal is wide enough for it.
-    let per_hour = banner::columns_per_hour(area.width);
+    let per_hour = banner::columns_per_hour(area.width, size.left_width());
     if per_hour == 0 {
         return;
     }
@@ -193,7 +330,12 @@ fn draw_banner(frame: &mut Frame, area: Rect, app: &App) {
         bars.push(Span::styled(glyph, style));
     }
     let axis = Line::styled(banner::axis_line(per_hour), app.muted());
-    frame.render_widget(Paragraph::new(vec![Line::from(bars), axis]), right);
+    // The chart and its hour labels sit on the bottom two rows, level with the date line;
+    // in the compact banner that is the whole area.
+    let mut rows: Vec<Line> = vec![Line::from(""); (area.height as usize).saturating_sub(2)];
+    rows.push(Line::from(bars));
+    rows.push(axis);
+    frame.render_widget(Paragraph::new(rows), right);
 }
 
 /// The tab bar with the period's total on the right.
@@ -275,11 +417,15 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     // Bars are scaled against the biggest value, wherever it is in the list.
     let max = categories.iter().map(|c| c.1).max().unwrap_or(1).max(1);
     let inner_w = cat_area.width.saturating_sub(2) as usize;
+    let cat_rows = cat_area.height.saturating_sub(2) as usize;
+    let (cat_skip, cat_hint) = app.window(Panel::Categories, categories.len(), cat_rows);
     let lines: Vec<Line> = if categories.is_empty() {
         vec![Line::styled("  nothing recorded yet", app.muted())]
     } else {
         categories
             .iter()
+            .skip(cat_skip)
+            .take(cat_rows)
             .map(|(name, secs)| {
                 bar_line(
                     name,
@@ -294,19 +440,21 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Categories · {} ", app.sort.label())),
-        ),
+        Paragraph::new(lines).block(app.list_block(
+            format!(" Categories · {}{} ", app.sort.label(), cat_hint),
+            Panel::Categories,
+            categories.len() > cat_rows,
+        )),
         cat_area,
     );
 
     let max = apps.iter().map(|a| a.secs).max().unwrap_or(1).max(1);
     let inner_w = app_area.width.saturating_sub(2) as usize;
     let rows = app_area.height.saturating_sub(2) as usize;
+    let (app_skip, app_hint) = app.window(Panel::Apps, apps.len(), rows);
     let lines: Vec<Line> = apps
         .iter()
+        .skip(app_skip)
         .take(rows)
         .map(|a| {
             bar_line(
@@ -321,11 +469,11 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Applications · {} ", app.sort.label())),
-        ),
+        Paragraph::new(lines).block(app.list_block(
+            format!(" Applications · {}{} ", app.sort.label(), app_hint),
+            Panel::Apps,
+            apps.len() > rows,
+        )),
         app_area,
     );
 
@@ -343,8 +491,10 @@ fn draw_sites(frame: &mut Frame, area: Rect, app: &App) {
     let max = sites.iter().map(|s| s.secs).max().unwrap_or(1).max(1);
     let inner_w = area.width.saturating_sub(2) as usize;
     let rows = area.height.saturating_sub(2) as usize;
+    let (skip, hint) = app.window(Panel::Sites, sites.len(), rows);
     let lines: Vec<Line> = sites
         .iter()
+        .skip(skip)
         .take(rows)
         .map(|s| {
             // Colour by the site's category, using the same theme accents as the apps.
@@ -361,7 +511,11 @@ fn draw_sites(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).block(app.block(format!(" Sites · {} ", app.sort.label()))),
+        Paragraph::new(lines).block(app.list_block(
+            format!(" Sites · {}{} ", app.sort.label(), hint),
+            Panel::Sites,
+            sites.len() > rows,
+        )),
         area,
     );
 }
@@ -521,7 +675,8 @@ fn draw_listening(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_months(frame: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snapshot;
     let rows = area.height.saturating_sub(2) as usize;
-    let skip = snap.months.len().saturating_sub(rows);
+    // Newest month first; scrolling down reveals older ones.
+    let (skip, hint) = app.window(Panel::Months, snap.months.len(), rows);
     let max = snap
         .months
         .iter()
@@ -535,7 +690,9 @@ fn draw_months(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         snap.months
             .iter()
+            .rev()
             .skip(skip)
+            .take(rows)
             .map(|m| {
                 let name = chrono::NaiveDate::from_ymd_opt(m.year, m.month, 1)
                     .map(|d| d.format("%b %Y").to_string())
@@ -556,14 +713,18 @@ fn draw_months(frame: &mut Frame, area: Rect, app: &App) {
     let active: i64 = snap.months.iter().map(|m| m.active_days).sum();
     let title = if active > 0 {
         format!(
-            " Active time by month · {} active days · avg {}/day ",
+            " Active time by month · {} active days · avg {}/day{} ",
             active,
-            fmt_duration(snap.total / active)
+            fmt_duration(snap.total / active),
+            hint
         )
     } else {
-        " Active time by month ".to_string()
+        format!(" Active time by month{hint} ")
     };
-    frame.render_widget(Paragraph::new(lines).block(app.block(title)), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(app.list_block(title, Panel::Months, snap.months.len() > rows)),
+        area,
+    );
 }
 
 /// Days down the side, hours across, darker = less active.
@@ -664,8 +825,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
-    let w = 56.min(area.width);
-    let h = 15.min(area.height);
+    let w = 62.min(area.width);
+    let h = 17.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -676,6 +837,8 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(" ←/→, Tab, h/l   next / previous view"),
         Line::from(" 1-5             Today / 7 days / 30 days / Year / All"),
         Line::from(" s               sort by time / by name"),
+        Line::from(" p               pick the list the arrow keys scroll"),
+        Line::from(" ↑/↓, PgUp/PgDn  scroll that list (Home/End: top/bottom)"),
         Line::from(" a               rename an app / change its category"),
         Line::from(" t               next colour theme"),
         Line::from(" b               show / hide the title banner"),
@@ -867,6 +1030,8 @@ mod tests {
             banner: true,
             assign: Assign::Closed,
             site_categories: Vec::new(),
+            scroll: Scroll::default(),
+            limits: Cell::new([0; 4]),
         }
     }
 
@@ -990,6 +1155,8 @@ mod tests {
             banner: true,
             assign: Assign::Closed,
             site_categories: Vec::new(),
+            scroll: Scroll::default(),
+            limits: Cell::new([0; 4]),
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));
@@ -1046,7 +1213,8 @@ mod tests {
     #[test]
     fn banner_shows_name_date_week_and_chart_and_can_hide() {
         let app = sample_app(View::Today);
-        let screen = render(&app, 120, 40);
+        // A compact terminal gets the spaced-out name.
+        let screen = render(&app, 120, 28);
         assert!(screen.contains("t i m e s i n k"), "{screen}");
         // Day 100 after the epoch is 1970-04-11, a Saturday in ISO week 15.
         assert!(
@@ -1058,9 +1226,126 @@ mod tests {
         let mut hidden = sample_app(View::Today);
         hidden.banner = false;
         assert!(!render(&hidden, 120, 40).contains("t i m e s i n k"));
+        assert!(!render(&hidden, 120, 40).contains("| |_ _ _ __"));
 
         // Too short a terminal hides it automatically.
-        assert!(!render(&app, 120, 20).contains("t i m e s i n k"));
+        let screen = render(&app, 120, 20);
+        assert!(!screen.contains("t i m e s i n k") && !screen.contains("| |_ _ _ __"));
+    }
+
+    #[test]
+    fn tall_terminals_get_the_big_title_with_date_and_chart() {
+        let app = sample_app(View::Today);
+        let screen = render(&app, 120, 40);
+        // Every row of the big title is on screen, and the spaced-out name is not.
+        for row in banner::BIG_TITLE {
+            assert!(screen.contains(row.trim_end()), "{row}\n{screen}");
+        }
+        assert!(!screen.contains("t i m e s i n k"));
+        assert!(
+            screen.contains("Saturday April 11 1970 · Week 15"),
+            "{screen}"
+        );
+        // The date line sits directly under the title's last row.
+        let lines: Vec<&str> = screen.lines().collect();
+        let last = lines
+            .iter()
+            .position(|l| l.contains(banner::BIG_TITLE[5].trim_end()))
+            .unwrap();
+        assert!(lines[last + 1].contains("Week 15"), "{screen}");
+        // The hour labels sit beside the date line.
+        assert!(lines[last + 1].contains("06"), "{screen}");
+        // At 31 rows it drops to the compact banner.
+        let compact = render(&app, 120, 31);
+        assert!(compact.contains("t i m e s i n k") && !compact.contains("| |_ _ _ __"));
+    }
+
+    #[test]
+    fn long_lists_scroll_and_say_how_many_rows_are_hidden() {
+        // 30 apps in a short terminal: only some fit.
+        let mut app = sample_app(View::Today);
+        let mut conf = String::new();
+        let mut spans = Vec::new();
+        for i in 0..30 {
+            conf.push_str(&format!("app{i:02} app{i:02} Other\n"));
+            spans.push(TimeSpan {
+                start: 100 * 86400 + 3600 * 9 + i * 700,
+                end: 100 * 86400 + 3600 * 9 + i * 700 + 600 - i,
+                key: format!("app{i:02}"),
+            });
+        }
+        let map = AppMap::from_conf(&conf);
+        app.snapshot = Snapshot::build(
+            &spans,
+            &[],
+            &map,
+            View::Today,
+            100 * 86400 + 15 * 3600,
+            &utc,
+        );
+        app.scroll.focus = Panel::Apps;
+
+        let top = render(&app, 100, 28);
+        assert!(top.contains("app00") && !top.contains("app29"), "{top}");
+        assert!(top.contains('↓'), "{top}");
+        assert!(!top.contains('↑'), "{top}");
+
+        // Scroll to the end: the last app shows, the hint flips to "more above".
+        let limits = app.limits.get();
+        assert!(limits[Panel::Apps.index()] > 0);
+        app.scroll.jump(true, limits);
+        let end = render(&app, 100, 28);
+        assert!(end.contains("app29") && !end.contains("app00"), "{end}");
+        assert!(end.contains('↑') && !end.contains('↓'), "{end}");
+
+        // One step up from the end moves by one row; scrolling never passes the ends.
+        app.scroll.by(-1, limits);
+        assert_eq!(
+            app.scroll.offsets[Panel::Apps.index()],
+            limits[Panel::Apps.index()] - 1
+        );
+        app.scroll.by(1000, limits);
+        assert_eq!(
+            app.scroll.offsets[Panel::Apps.index()],
+            limits[Panel::Apps.index()]
+        );
+        app.scroll.by(-1000, limits);
+        assert_eq!(app.scroll.offsets[Panel::Apps.index()], 0);
+    }
+
+    #[test]
+    fn short_lists_do_not_change_the_screen_when_scroll_keys_are_used() {
+        let mut app = sample_app(View::Today);
+        let before = render(&app, 120, 40);
+        app.scroll.by(5, app.limits.get());
+        app.scroll.jump(true, app.limits.get());
+        assert_eq!(render(&app, 120, 40), before);
+        assert!(!before.contains('↓'));
+    }
+
+    #[test]
+    fn p_cycles_through_the_lists_that_exist_in_the_view() {
+        let mut app = sample_app(View::Today);
+        assert_eq!(app.panels(), vec![Panel::Apps, Panel::Categories]);
+        let panels = app.panels();
+        assert_eq!(app.scroll.focus, Panel::Apps);
+        app.scroll.next_focus(&panels);
+        assert_eq!(app.scroll.focus, Panel::Categories);
+        app.scroll.next_focus(&panels);
+        assert_eq!(app.scroll.focus, Panel::Apps);
+        // The monthly table joins the cycle in the Year view.
+        assert!(sample_app(View::Year).panels().contains(&Panel::Months));
+    }
+
+    #[test]
+    fn the_month_table_lists_newest_first_and_scrolls_to_older_months() {
+        let mut app = sample_app(View::All);
+        app.scroll.focus = Panel::Months;
+        // The sample data runs from 1969 to April 1970; the newest month is on top.
+        let top = render(&app, 120, 40);
+        let apr = top.find("Apr 1970").unwrap();
+        let mar = top.find("Mar 1970").unwrap();
+        assert!(apr < mar, "{top}");
     }
 
     #[test]

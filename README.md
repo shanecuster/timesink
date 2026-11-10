@@ -173,6 +173,8 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | `a` | rename an app or move it to another category (or a new one); saved to `apps.conf` |
 | `t` | next colour theme |
 | `b` | show / hide the title banner |
+| `p` | choose which list the scroll keys move (Applications, Categories, Sites, or the month table) |
+| `↑` `↓`, `j` `k`, `PgUp` `PgDn`, `Home` `End` | scroll that list when it holds more rows than fit |
 | `e` | export the view you are looking at (then `c` csv, `j` json, `m` markdown, `h` html, `Esc` cancel) |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
@@ -186,12 +188,21 @@ then pick a category or type a new one. The choice is appended as a line to your
 comments and its order are never rewritten) and the screen updates at once. A new
 category goes to the end of the file, so it takes the next free bar colour.
 
+### Long lists
+
+Lists show as many rows as fit. When some are hidden, the panel title says so
+(`↓3` means three more below, `↑` means rows above) and the list the scroll keys
+control gets an accent-coloured border. With short lists nothing changes. The
+month table in the Year and All time views lists the newest month first and
+scrolls down to older ones.
+
 ### Title banner and themes
 
 The top of the screen shows the name, today's full date with the ISO week
 number, and a small chart of how busy each hour of today was (the current hour
-is underlined). It hides itself on terminals shorter than 24 rows, and the
-chart drops out when the window is too narrow for it; `b` turns it off.
+is underlined). On terminals 32 rows or taller the name is drawn large; between
+24 and 31 rows it is the small spaced-out name; below 24 rows the banner hides
+itself. The chart drops out when the window is too narrow for it; `b` turns it off.
 
 `t` cycles through eight themes that match tuxwire and zerohour: Everforest
 (the default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo

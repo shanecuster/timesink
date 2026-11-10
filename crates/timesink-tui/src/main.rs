@@ -9,6 +9,7 @@ mod export;
 mod palette;
 mod ui;
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -22,7 +23,7 @@ use timesink_core::theme;
 
 use crate::data::{Snapshot, View};
 use crate::export::Format;
-use crate::ui::{App, SortMode};
+use crate::ui::{App, Scroll, SortMode};
 
 /// How often the screen refreshes by itself.
 const REFRESH: Duration = Duration::from_secs(5);
@@ -124,6 +125,8 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         banner: settings.banner,
         assign: assign::Assign::Closed,
         site_categories: Vec::new(),
+        scroll: Scroll::default(),
+        limits: Cell::new([0; 4]),
         export_menu: false,
         notice: None,
         show_help: false,
@@ -235,6 +238,36 @@ fn run(
                         None
                     }
                     KeyCode::Char('r') => Some(view),
+                    // `p` picks which list the scroll keys move.
+                    KeyCode::Char('p') => {
+                        let panels = app.panels();
+                        app.scroll.next_focus(&panels);
+                        None
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.scroll.by(1, app.limits.get());
+                        None
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.scroll.by(-1, app.limits.get());
+                        None
+                    }
+                    KeyCode::PageDown => {
+                        app.scroll.by(5, app.limits.get());
+                        None
+                    }
+                    KeyCode::PageUp => {
+                        app.scroll.by(-5, app.limits.get());
+                        None
+                    }
+                    KeyCode::Home => {
+                        app.scroll.jump(false, app.limits.get());
+                        None
+                    }
+                    KeyCode::End => {
+                        app.scroll.jump(true, app.limits.get());
+                        None
+                    }
                     _ => None,
                 };
                 if let Some(v) = new_view {
