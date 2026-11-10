@@ -176,6 +176,8 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | `p` | choose which list the scroll keys move (Applications, Categories, Sites, or the month table) |
 | `↑` `↓`, `j` `k`, `PgUp` `PgDn`, `Home` `End` | scroll that list when it holds more rows than fit |
 | `e` | export the view you are looking at (then `c` csv, `j` json, `m` markdown, `h` html, `Esc` cancel) |
+| `d` | show all computers combined, or one computer at a time (when more than one has synced) |
+| `S` | sync with CouchDB now, in the background |
 | `r` | refresh now (it also refreshes every 5 seconds) |
 | `?` | help |
 | `q`, `Esc` | quit |
@@ -332,3 +334,29 @@ timesink backup                          # a dated copy of the database
 - **Backups:** `timesink backup` writes a consistent copy with SQLite's
   `VACUUM INTO`, which is safe while the daemon is recording. To restore, stop
   the service and copy the backup over `~/.local/share/timesink/timesink.db`.
+
+## Syncing between computers (CouchDB)
+
+timesink can share its data between computers (mangrove, a laptop, a Steam Deck)
+through a CouchDB database you run. Each computer uploads only its own rows and
+downloads everyone else's, so nothing can conflict.
+
+1. Create an empty database on the server, then copy `contrib/sync.conf.example` to
+   `~/.config/timesink/sync.conf`, fill in `url`, `database`, `user` and `password`,
+   and run `chmod 600 ~/.config/timesink/sync.conf`.
+2. `timesink sync` uploads the days that changed and downloads the other
+   computers' days. `timesink sync status` shows what is configured and what is
+   waiting, without contacting the server.
+3. Press `S` in the interface to sync in the background, or run it on a timer. A
+   systemd user timer (`~/.config/systemd/user/timesink-sync.timer` with
+   `OnUnitActiveSec=5min`, and a service that runs `timesink sync`) works well.
+4. In the interface, `d` switches between all computers combined (the default; time
+   that overlaps across computers is added up) and each computer alone.
+
+What is shared: one CouchDB document per computer per UTC day, holding app focus
+intervals, listening and website time. **Window titles are never uploaded**; rows
+downloaded from other computers have empty titles. `apps.conf` and `domains.conf`
+stay on each computer. Forgetting data on one computer removes its documents from the
+server, so it disappears from the others too. The database is backed up before the
+first run with the new format (`timesink.db.bak-v4`); take a restic backup before the
+first real sync.

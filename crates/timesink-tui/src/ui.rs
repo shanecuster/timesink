@@ -47,6 +47,12 @@ pub struct App {
     /// The furthest each list can scroll, written by `draw` so key presses can be kept in
     /// range (indexed by `Panel::index`).
     pub limits: Cell<[usize; 4]>,
+    /// Show only this computer's rows (None = all computers combined).
+    pub device: Option<String>,
+    /// Every computer with rows here, for the `d` key.
+    pub devices: Vec<String>,
+    /// Is a sync running in the background?
+    pub syncing: bool,
 }
 
 /// The lists that can scroll when they hold more rows than fit.
@@ -364,7 +370,16 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .position(|v| *v == app.snapshot.view)
         .unwrap_or(0);
-    let title = format!(" timesink · {} active ", fmt_duration(app.snapshot.total));
+    let scope = match (&app.device, app.devices.len() > 1) {
+        (Some(d), _) => format!(" · {d}"),
+        (None, true) => " · all devices".to_string(),
+        (None, false) => String::new(),
+    };
+    let sync = if app.syncing { " · syncing…" } else { "" };
+    let title = format!(
+        " timesink · {} active{scope}{sync} ",
+        fmt_duration(app.snapshot.total)
+    );
     let tabs = Tabs::new(titles)
         .select(selected)
         .block(app.block(title))
@@ -845,7 +860,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let w = 62.min(area.width);
-    let h = 17.min(area.height);
+    let h = 19.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -862,6 +877,8 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(" t               next colour theme"),
         Line::from(" b               show / hide the title banner"),
         Line::from(" e               export this view (csv, json, md, html)"),
+        Line::from(" d               all computers / each computer in turn"),
+        Line::from(" S               sync with CouchDB now"),
         Line::from(" r               refresh now"),
         Line::from(" ?               close this help"),
         Line::from(" q, Esc          quit"),
@@ -1051,7 +1068,21 @@ mod tests {
             site_categories: Vec::new(),
             scroll: Scroll::default(),
             limits: Cell::new([0; 4]),
+            device: None,
+            devices: Vec::new(),
+            syncing: false,
         }
+    }
+
+    #[test]
+    fn the_tab_title_names_the_computer_being_shown() {
+        let mut app = sample_app(View::Week);
+        app.devices = vec!["deck".into(), "laptop".into()];
+        assert!(render(&app, 120, 40).contains("all devices"));
+        app.device = Some("laptop".into());
+        assert!(render(&app, 120, 40).contains("· laptop"));
+        app.syncing = true;
+        assert!(render(&app, 120, 40).contains("syncing"));
     }
 
     #[test]
@@ -1176,6 +1207,9 @@ mod tests {
             site_categories: Vec::new(),
             scroll: Scroll::default(),
             limits: Cell::new([0; 4]),
+            device: None,
+            devices: Vec::new(),
+            syncing: false,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));

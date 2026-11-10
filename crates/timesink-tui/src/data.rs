@@ -225,16 +225,17 @@ impl Snapshot {
         &mut self,
         db: &Db,
         config: &DomainConfig,
+        device: Option<&str>,
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Result<()> {
         let from = stats::day_start_utc(self.today - (self.days.len() as i64 - 1), tz);
-        let rows = db.domains_between(from, now + 1, None)?;
+        let rows = db.domains_between(from, now + 1, device)?;
         if rows.is_empty() {
             self.sites.clear();
             return Ok(());
         }
-        let intervals = db.intervals_between(from, now + 1, None)?;
+        let intervals = db.intervals_between(from, now + 1, device)?;
         let spans = site_spans(&rows, &intervals, config);
         self.sites = site_totals(&spans, config, from, now + 1);
         Ok(())
@@ -245,6 +246,7 @@ impl Snapshot {
         db: &Db,
         map: &AppMap,
         view: View,
+        device: Option<&str>,
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Result<Snapshot> {
@@ -261,7 +263,7 @@ impl Snapshot {
         // Read from the start of the first day to now.
         let from = stats::day_start_utc(first, tz);
         let spans: Vec<Span> = db
-            .intervals_between(from, now + 1, None)?
+            .intervals_between(from, now + 1, device)?
             .into_iter()
             .map(|i| Span {
                 start: i.start_ts,
@@ -270,7 +272,7 @@ impl Snapshot {
             })
             .collect();
         let listening: Vec<Span> = db
-            .listening_between(from, now + 1, None)?
+            .listening_between(from, now + 1, device)?
             .into_iter()
             .map(|(player, start, end)| Span {
                 start,
@@ -576,7 +578,7 @@ mod tests {
         let db = Db::open_in_memory("box").unwrap();
         let now = 1_794_225_600; // 2026-11-09 12:00 UTC
                                  // Nothing recorded: just today, nothing to show.
-        let empty = Snapshot::load(&db, &map(), View::All, now, &utc).unwrap();
+        let empty = Snapshot::load(&db, &map(), View::All, None, now, &utc).unwrap();
         assert_eq!(empty.days.len(), 1);
         assert_eq!(empty.total, 0);
         // Data from 10 days ago: the view reaches back exactly that far.
@@ -590,7 +592,7 @@ mod tests {
             },
         )
         .unwrap();
-        let snap = Snapshot::load(&db, &map(), View::All, now, &utc).unwrap();
+        let snap = Snapshot::load(&db, &map(), View::All, None, now, &utc).unwrap();
         assert_eq!(snap.days.len(), 11);
         assert!(View::All.by_month() && View::Year.by_month() && !View::Month.by_month());
         assert_eq!(View::All.days(), None);

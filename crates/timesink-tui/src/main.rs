@@ -11,6 +11,7 @@ mod sync;
 mod ui;
 
 use std::cell::Cell;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -112,7 +113,7 @@ fn start() -> Result<()> {
 
 /// Open the interactive screens and run them until the user quits.
 fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
-    let snapshot = Snapshot::load(&db, &map, View::Today, now_ts(), &local_offset)?;
+    let snapshot = Snapshot::load(&db, &map, View::Today, None, now_ts(), &local_offset)?;
     // Remembered choices (theme, sort order, banner). A broken settings file is not worth
     // refusing to start over, so fall back to the defaults.
     let settings = paths::tui_settings_path()
@@ -132,6 +133,9 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         site_categories: Vec::new(),
         scroll: Scroll::default(),
         limits: Cell::new([0; 4]),
+        device: None,
+        devices: db.devices().unwrap_or_default(),
+        syncing: false,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -156,11 +160,36 @@ fn run(
     map: &mut AppMap,
 ) -> Result<()> {
     let mut last_refresh = Instant::now();
+    let mut sync_rx: Option<mpsc::Receiver<String>> = None;
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        // Wake up for the next refresh even if no key is pressed.
-        let wait = REFRESH.saturating_sub(last_refresh.elapsed());
+        // A finished background sync shows its result and re-reads the numbers.
+        if let Some(rx) = &sync_rx {
+            match rx.try_recv() {
+                Ok(message) => {
+                    sync_rx = None;
+                    app.syncing = false;
+                    app.notice = Some(format!(" {message}"));
+                    let view = app.snapshot.view;
+                    reload(app, db, map, view);
+                    last_refresh = Instant::now();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    sync_rx = None;
+                    app.syncing = false;
+                    app.notice = Some(" sync stopped unexpectedly".into());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Wake up for the next refresh even if no key is pressed (sooner while a sync
+        // runs, so its result shows up promptly).
+        let mut wait = REFRESH.saturating_sub(last_refresh.elapsed());
+        if sync_rx.is_some() {
+            wait = wait.min(Duration::from_millis(300));
+        }
         if event::poll(wait).context("reading the keyboard")? {
             if let Event::Key(key) = event::read()? {
                 // Ignore key releases (some terminals send them).
@@ -243,6 +272,25 @@ fn run(
                         None
                     }
                     KeyCode::Char('r') => Some(view),
+                    KeyCode::Char('d') => {
+                        app.devices = db.devices().unwrap_or_default();
+                        if app.devices.len() < 2 {
+                            app.notice = Some(" only one computer has data here".into());
+                            None
+                        } else {
+                            app.device = next_device(&app.devices, app.device.as_deref());
+                            Some(view)
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if app.syncing {
+                            app.notice = Some(" a sync is already running".into());
+                        } else {
+                            sync_rx = Some(start_sync());
+                            app.syncing = true;
+                        }
+                        None
+                    }
                     // `p` picks which list the scroll keys move.
                     KeyCode::Char('p') => {
                         let panels = app.panels();
@@ -280,6 +328,8 @@ fn run(
                     last_refresh = Instant::now();
                 }
             }
+        } else if sync_rx.is_some() && last_refresh.elapsed() < REFRESH {
+            // Only the short sync poll ran out; nothing to redraw but the spinner.
         } else {
             // The timer ran out: refresh whatever is on screen.
             let view = app.snapshot.view;
@@ -342,22 +392,79 @@ fn export_view(db: &Db, map: &AppMap, format: Format, view: View) -> String {
 fn attach_sites(app: &mut App, db: &Db) {
     let config = paths::load_domain_config().unwrap_or_default();
     app.site_categories = config.sites.categories();
-    if let Err(e) = app
-        .snapshot
-        .attach_sites(db, &config, now_ts(), &local_offset)
+    if let Err(e) =
+        app.snapshot
+            .attach_sites(db, &config, app.device.as_deref(), now_ts(), &local_offset)
     {
         app.status = Some(format!(" could not read website time: {e:#}"));
     }
 }
 
+/// The next choice after `current` in: all, then each computer, then all again.
+fn next_device(devices: &[String], current: Option<&str>) -> Option<String> {
+    match current {
+        None => devices.first().cloned(),
+        Some(c) => {
+            let i = devices.iter().position(|d| d == c)?;
+            devices.get(i + 1).cloned()
+        }
+    }
+}
+
+/// Run a sync on its own thread with its own database connection, and send back one
+/// line describing the outcome.
+fn start_sync() -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = paths::db_path()
+            .and_then(|p| Db::open(&p, &paths::device_id()))
+            .and_then(|db| commands::run_sync(&db, false));
+        let message = match outcome {
+            Ok(text) => text.replace('\n', " · "),
+            Err(e) => format!("sync failed: {e:#}"),
+        };
+        let _ = tx.send(message);
+    });
+    rx
+}
+
 /// Recompute the numbers. A failure is shown in the footer, not fatal.
 fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
-    match Snapshot::load(db, map, view, now_ts(), &local_offset) {
+    app.devices = db.devices().unwrap_or_default();
+    // A device that vanished (forgotten elsewhere) goes back to the combined view.
+    if app
+        .device
+        .as_ref()
+        .is_some_and(|d| !app.devices.contains(d))
+    {
+        app.device = None;
+    }
+    match Snapshot::load(
+        db,
+        map,
+        view,
+        app.device.as_deref(),
+        now_ts(),
+        &local_offset,
+    ) {
         Ok(snapshot) => {
             app.snapshot = snapshot;
             app.status = None;
             attach_sites(app, db);
         }
         Err(e) => app.status = Some(format!(" could not read the database: {e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn device_key_cycles_through_all_then_each_then_all() {
+        let d = vec!["deck".to_string(), "laptop".to_string()];
+        assert_eq!(super::next_device(&d, None), Some("deck".into()));
+        assert_eq!(super::next_device(&d, Some("deck")), Some("laptop".into()));
+        assert_eq!(super::next_device(&d, Some("laptop")), None);
+        // A device that disappeared falls back to the combined view.
+        assert_eq!(super::next_device(&d, Some("gone")), None);
     }
 }
