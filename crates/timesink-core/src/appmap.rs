@@ -28,6 +28,36 @@ use std::collections::HashMap;
 /// The category given to any application that is not listed.
 pub const OTHER: &str = "Other";
 
+/// Window classes of well-known web browsers (lower case). An application that is not
+/// listed in `apps.conf` but matches one of these is shown under [`BROWSER`] instead of
+/// "Other". A name ending in `*` matches everything that starts with it.
+const BROWSER_CLASSES: &[&str] = &[
+    "firefox",
+    "firefox-esr",
+    "firefox-developer-edition",
+    "org.mozilla.firefox",
+    "zen",
+    "zen-*",
+    "app.zen_browser.zen",
+    "librewolf",
+    "io.gitlab.librewolf-community",
+    "floorp",
+    "chromium",
+    "chromium-browser",
+    "org.chromium.chromium",
+    "google-chrome*",
+    "brave-browser*",
+    "com.brave.browser",
+    "vivaldi*",
+    "microsoft-edge*",
+    "opera",
+    "org.gnome.epiphany",
+    "org.kde.falkon",
+];
+
+/// The category given to well-known browsers that are not listed.
+pub const BROWSER: &str = "Browser";
+
 /// How one application should be shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppInfo {
@@ -56,9 +86,30 @@ pub struct AppMap {
     prefixes: Vec<(String, Entry)>,
     /// Categories in the order they first appear in the file ("Other" excluded).
     category_order: Vec<String>,
+    /// Should well-known browsers that are not listed count as "Browser"? Only the
+    /// application map turns this on; the website map (`domains.conf`) must not, or a
+    /// site such as brave.com would be called a browser.
+    browser_defaults: bool,
 }
 
 impl AppMap {
+    /// Turn on the built-in category for well-known browsers. Lines in the file still
+    /// win, so a browser you list (under any category) is never overridden.
+    pub fn with_browser_defaults(mut self) -> Self {
+        self.browser_defaults = true;
+        self
+    }
+
+    /// Is `key` (already lower case) the window class of a well-known browser?
+    fn is_known_browser(key: &str) -> bool {
+        BROWSER_CLASSES
+            .iter()
+            .any(|known| match known.strip_suffix('*') {
+                Some(prefix) => key.starts_with(prefix),
+                None => key == *known,
+            })
+    }
+
     /// Parse the text of an `apps.conf` file. Lines that cannot be understood
     /// (fewer than three fields) are skipped rather than treated as errors, so
     /// one typo never stops the daemon or the report.
@@ -115,6 +166,12 @@ impl AppMap {
             .max_by_key(|(prefix, _)| prefix.len());
         match best {
             Some((_, entry)) => Self::info(entry),
+            // Not listed, but clearly a browser: keep the raw name, use the usual category.
+            None if self.browser_defaults && Self::is_known_browser(&key) => AppInfo {
+                display: raw_class.to_string(),
+                category: BROWSER.to_string(),
+                mapped: false,
+            },
             None => AppInfo {
                 display: raw_class.to_string(),
                 category: OTHER.to_string(),
@@ -282,6 +339,39 @@ mod tests {
              io.github.lgse.Strata*   strata   Files\n\
              some.app                 thing    Deep Work\n",
         )
+    }
+
+    #[test]
+    fn unlisted_browsers_default_to_the_browser_category() {
+        let map = sample().with_browser_defaults();
+        let info = map.lookup("Firefox");
+        assert_eq!(info.category, "Browser");
+        assert_eq!(info.display, "Firefox");
+        // Still reported as not listed, so `timesink-daemon apps` keeps pointing at it.
+        assert!(!info.mapped);
+        assert_eq!(map.lookup("google-chrome-stable").category, "Browser");
+        assert_eq!(map.lookup("brave-browser").category, "Browser");
+        // Something that only looks a bit like a browser is left alone.
+        assert_eq!(map.lookup("firefoxy-notes").category, "Other");
+        assert_eq!(map.lookup("operator").category, "Other");
+    }
+
+    #[test]
+    fn browser_defaults_are_off_unless_asked_for() {
+        // The website map never turns them on.
+        assert_eq!(sample().lookup("firefox").category, "Other");
+    }
+
+    #[test]
+    fn a_listed_browser_keeps_the_users_choice() {
+        let map =
+            AppMap::from_conf("firefox ff Research\nzen-* zen Browser\n").with_browser_defaults();
+        let info = map.lookup("firefox");
+        assert_eq!(
+            (info.display.as_str(), info.category.as_str()),
+            ("ff", "Research")
+        );
+        assert!(info.mapped);
     }
 
     #[test]

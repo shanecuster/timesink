@@ -68,11 +68,13 @@ pub fn load_config() -> Result<Config> {
 }
 
 /// Load `apps.conf` (friendly names and categories). Without the file every
-/// app keeps its raw name and is listed under "Other".
+/// app keeps its raw name and is listed under "Other", except that well-known browsers
+/// are shown as "Browser" (a line in the file always wins).
 pub fn load_app_map() -> Result<AppMap> {
     Ok(read_config_file("apps.conf")?
         .map(|text| AppMap::from_conf(&text))
-        .unwrap_or_default())
+        .unwrap_or_default()
+        .with_browser_defaults())
 }
 
 /// Where the interface remembers its choices: `tui.conf` in the config folder.

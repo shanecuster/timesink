@@ -115,6 +115,8 @@ The database stores each application's raw window class, for example
 categories, copy `contrib/apps.conf.example` to
 `~/.config/timesink/apps.conf` and edit it:
 
+Well-known browsers (Firefox, Zen, Chromium, Chrome, Brave, Vivaldi, Edge and a few more) that have no line in `apps.conf` are shown under **Browser** instead of Other. A line of your own always wins, so you can still give a browser another name or category.
+
 ```
 org.wezfurlong.wezterm   wezterm   Terminal
 io.github.lgse.Strata*   strata    Files
