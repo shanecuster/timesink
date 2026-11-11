@@ -364,7 +364,8 @@ downloads everyone else's, so nothing can conflict.
    `systemctl --user disable --now timesink-sync.timer` turns it off. A run that cannot
    reach the server (say the computer is off the tailnet) just fails and tries again
    at the next interval; nothing is lost.
-4. In the interface, `d` switches between all computers combined (the default; time
+4. The footer of the interface shows how the last sync went ("synced 2m ago", or "sync failed 3m ago" if the latest try did not work), whoever ran it: the timer, `S` or the command line.
+5. In the interface, `d` switches between all computers combined (the default; time
    that overlaps across computers is added up) and each computer alone.
 
 What is shared: one CouchDB document per computer per UTC day, holding app focus

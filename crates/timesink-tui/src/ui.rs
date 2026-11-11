@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
@@ -53,6 +53,9 @@ pub struct App {
     pub devices: Vec<String>,
     /// Is a sync running in the background?
     pub syncing: bool,
+    /// How the last sync went ("synced 2m ago"), shown at the right of the footer.
+    /// None when this computer has never synced.
+    pub sync_note: Option<String>,
 }
 
 /// The lists that can scroll when they hold more rows than fit.
@@ -854,7 +857,39 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         " ←/→ view · s sort · a apps · t theme · b banner · e export · r refresh · ? help · q quit"
             .to_string()
     };
+    // The sync note sits at the right edge, but only where it does not run into the text.
+    if let Some(note) = &app.sync_note {
+        let note = format!("{note} ");
+        let room = (area.width as usize).saturating_sub(text.chars().count() + 2);
+        if note.chars().count() <= room {
+            frame.render_widget(
+                Paragraph::new(Line::styled(note, app.muted())).alignment(Alignment::Right),
+                area,
+            );
+        }
+    }
     frame.render_widget(Paragraph::new(Line::styled(text, app.muted())), area);
+}
+
+/// How long ago something was, in a few words ("just now", "5m ago", "3h ago", "2d ago").
+pub fn fmt_ago(secs: i64) -> String {
+    match secs.max(0) {
+        0..=59 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86400),
+    }
+}
+
+/// The footer note for the sync times saved in the database: `last_ok` is the last
+/// success and `last_failed` the last failure since then (empty or missing if none).
+/// Returns None when no sync has ever been tried.
+pub fn sync_note(last_ok: Option<i64>, last_failed: Option<i64>, now: i64) -> Option<String> {
+    match (last_ok, last_failed) {
+        (_, Some(failed)) => Some(format!("sync failed {}", fmt_ago(now - failed))),
+        (Some(ok), None) => Some(format!("synced {}", fmt_ago(now - ok))),
+        (None, None) => None,
+    }
 }
 
 /// A small box listing the keys.
@@ -1071,7 +1106,34 @@ mod tests {
             device: None,
             devices: Vec::new(),
             syncing: false,
+            sync_note: None,
         }
+    }
+
+    #[test]
+    fn ago_and_sync_note_wording() {
+        assert_eq!(fmt_ago(10), "just now");
+        assert_eq!(fmt_ago(5 * 60 + 3), "5m ago");
+        assert_eq!(fmt_ago(3 * 3600), "3h ago");
+        assert_eq!(fmt_ago(2 * 86400 + 5), "2d ago");
+        // A clock that moved backwards never shows a negative time.
+        assert_eq!(fmt_ago(-30), "just now");
+        assert_eq!(sync_note(None, None, 1000), None);
+        assert_eq!(sync_note(Some(940), None, 1000).unwrap(), "synced 1m ago");
+        // A failure after the last success is what matters most.
+        assert_eq!(
+            sync_note(Some(940), Some(990), 1000).unwrap(),
+            "sync failed just now"
+        );
+    }
+
+    #[test]
+    fn the_footer_shows_the_sync_note_when_it_fits() {
+        let mut app = sample_app(View::Week);
+        app.sync_note = Some("synced 2m ago".into());
+        assert!(render(&app, 120, 40).contains("synced 2m ago"));
+        // Too narrow for both: the key hints win.
+        assert!(!render(&app, 70, 40).contains("synced 2m ago"));
     }
 
     #[test]
@@ -1210,6 +1272,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             syncing: false,
+            sync_note: None,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));

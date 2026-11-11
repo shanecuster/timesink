@@ -136,6 +136,7 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         device: None,
         devices: db.devices().unwrap_or_default(),
         syncing: false,
+        sync_note: None,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -144,6 +145,7 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
 
     // Website time, if the browser extension has recorded any.
     attach_sites(&mut app, &db);
+    app.sync_note = read_sync_note(&db);
 
     // Restores the terminal even if drawing panics.
     let mut terminal = ratatui::init();
@@ -400,6 +402,18 @@ fn attach_sites(app: &mut App, db: &Db) {
     }
 }
 
+/// Read how the last sync went from the database, for the footer.
+fn read_sync_note(db: &Db) -> Option<String> {
+    // A saved time, or None if the key is missing, empty ("cleared") or not a number.
+    let time = |key: &str| -> Option<i64> {
+        db.sync_state(key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse().ok())
+    };
+    ui::sync_note(time("last_ok"), time("last_failed"), now_ts())
+}
+
 /// The next choice after `current` in: all, then each computer, then all again.
 fn next_device(devices: &[String], current: Option<&str>) -> Option<String> {
     match current {
@@ -431,6 +445,7 @@ fn start_sync() -> mpsc::Receiver<String> {
 /// Recompute the numbers. A failure is shown in the footer, not fatal.
 fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     app.devices = db.devices().unwrap_or_default();
+    app.sync_note = read_sync_note(db);
     // A device that vanished (forgotten elsewhere) goes back to the combined view.
     if app
         .device

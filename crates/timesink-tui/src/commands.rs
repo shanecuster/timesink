@@ -293,7 +293,21 @@ pub fn run_sync(db: &Db, status_only: bool) -> Result<String> {
         return Ok(out);
     }
     let mut remote = HttpRemote::new(config);
-    let report = sync::run(db, &mut remote)?;
+    let outcome = sync::run(db, &mut remote);
+    // Remember how it went, so the interface can show "synced 2m ago" or "sync failed".
+    // Whoever ran the sync (the timer, the `S` key or the command line) leaves the same
+    // trace. A failure to save the note is not worth failing over.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = match &outcome {
+        Ok(_) => db
+            .set_sync_state("last_ok", &now.to_string())
+            .and_then(|_| db.set_sync_state("last_failed", "")),
+        Err(_) => db.set_sync_state("last_failed", &now.to_string()),
+    };
+    let report = outcome?;
     out.push_str(&format!(
         "Uploaded {} day(s), removed {} from the server, downloaded {} day(s) from other devices.",
         report.uploaded, report.removed, report.downloaded
