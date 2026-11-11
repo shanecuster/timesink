@@ -133,6 +133,15 @@ mod tests {
     }
 
     #[test]
+    fn zens_underscored_instance_name_counts_as_the_browser() {
+        let ids = playing_ids([
+            ("org.mpris.MediaPlayer2.firefox.instance_1_82", "Playing"),
+            ("org.mpris.MediaPlayer2.firefox.instance_1_90", "Playing"),
+        ]);
+        assert_eq!(ids, vec!["firefox".to_string()]);
+    }
+
+    #[test]
     fn two_windows_of_one_player_count_once() {
         let ids = playing_ids([
             ("org.mpris.MediaPlayer2.firefox.instance1", "Playing"),

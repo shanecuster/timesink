@@ -16,13 +16,22 @@ const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 /// Turn a D-Bus player name into a short, private player id.
 ///
 /// `org.mpris.MediaPlayer2.cider` becomes `cider`. Browsers add a per-process
-/// suffix (`firefox.instance12345`), which is removed. Only the player's name
+/// suffix (`firefox.instance12345`, or `firefox.instance_1_82` as Zen does), which is
+/// removed so every run of the browser counts as one player. Only the player's name
 /// is kept; track titles and artists are never read.
 pub fn player_id(bus_name: &str) -> String {
     let name = bus_name.strip_prefix(MPRIS_PREFIX).unwrap_or(bus_name);
-    // Drop an ".instance<number>" suffix, if there is one.
+    // Drop an ".instance" suffix made of digits and underscores ("12345", "_1_82"),
+    // if there is one. The part after "instance" must hold at least one digit, so a
+    // name that merely contains "instance" is left alone.
     let name = match name.rsplit_once(".instance") {
-        Some((base, rest)) if !base.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) => base,
+        Some((base, rest))
+            if !base.is_empty()
+                && rest.chars().any(|c| c.is_ascii_digit())
+                && rest.chars().all(|c| c.is_ascii_digit() || c == '_') =>
+        {
+            base
+        }
         _ => name,
     };
     name.to_lowercase()
@@ -145,6 +154,20 @@ mod tests {
             "firefox"
         );
         assert_eq!(player_id("org.mpris.MediaPlayer2.Spotify"), "spotify");
+        // Zen's real bus name, with underscores in the suffix.
+        assert_eq!(
+            player_id("org.mpris.MediaPlayer2.firefox.instance_1_82"),
+            "firefox"
+        );
+        // A suffix with no digits, or with letters, is not a process number.
+        assert_eq!(
+            player_id("org.mpris.MediaPlayer2.firefox.instance_"),
+            "firefox.instance_"
+        );
+        assert_eq!(
+            player_id("org.mpris.MediaPlayer2.firefox.instance_abc1"),
+            "firefox.instance_abc1"
+        );
         // A name that merely contains "instance" is left alone.
         assert_eq!(player_id("org.mpris.MediaPlayer2.instancey"), "instancey");
     }
