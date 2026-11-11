@@ -7,6 +7,7 @@ mod commands;
 mod data;
 mod export;
 mod palette;
+mod period;
 mod sync;
 mod ui;
 
@@ -113,7 +114,7 @@ fn start() -> Result<()> {
 
 /// Open the interactive screens and run them until the user quits.
 fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
-    let snapshot = Snapshot::load(&db, &map, View::Today, None, now_ts(), &local_offset)?;
+    let snapshot = Snapshot::load_default(&db, &map, View::Today, None, now_ts(), &local_offset)?;
     // Remembered choices (theme, sort order, banner). A broken settings file is not worth
     // refusing to start over, so fall back to the defaults.
     let settings = paths::tui_settings_path()
@@ -454,7 +455,7 @@ fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     {
         app.device = None;
     }
-    match Snapshot::load(
+    match Snapshot::load_default(
         db,
         map,
         view,

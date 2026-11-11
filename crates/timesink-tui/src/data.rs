@@ -10,6 +10,8 @@ use timesink_core::domains::{self, DomainConfig};
 use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Segment, Span};
 
+use crate::period::Range;
+
 /// Which period is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -55,6 +57,15 @@ impl View {
     /// Does this view show months instead of a day-by-hour grid? (Too many days to list.)
     pub fn by_month(self) -> bool {
         matches!(self, View::Year | View::All)
+    }
+
+    /// The days this view covers when it ends today: a window of `days()` days, or for
+    /// "All time" everything from `earliest_day` (the first recorded day, if any).
+    pub fn rolling_range(self, today: i64, earliest_day: Option<i64>) -> Range {
+        match self.days() {
+            Some(n) => Range::ending(today, n),
+            None => Range::new(earliest_day.unwrap_or(today), today),
+        }
     }
 
     /// The next tab, wrapping round.
@@ -195,6 +206,8 @@ pub struct Snapshot {
     pub view: View,
     /// Local day number of today.
     pub today: i64,
+    /// The days the numbers cover (the last one is usually today).
+    pub range: Range,
     /// Total active seconds in the period.
     pub total: i64,
     /// Seconds per category, biggest first.
@@ -229,41 +242,32 @@ impl Snapshot {
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Result<()> {
-        let from = stats::day_start_utc(self.today - (self.days.len() as i64 - 1), tz);
-        let rows = db.domains_between(from, now + 1, device)?;
+        let (from, to) = self.range.bounds(now, tz);
+        let rows = db.domains_between(from, to, device)?;
         if rows.is_empty() {
             self.sites.clear();
             return Ok(());
         }
-        let intervals = db.intervals_between(from, now + 1, device)?;
+        let intervals = db.intervals_between(from, to, device)?;
         let spans = site_spans(&rows, &intervals, config);
-        self.sites = site_totals(&spans, config, from, now + 1);
+        self.sites = site_totals(&spans, config, from, to);
         Ok(())
     }
 
-    /// Read the rows for `view` from the database and work out the numbers.
+    /// Read the rows for `view` over `range` from the database and work out the numbers.
     pub fn load(
         db: &Db,
         map: &AppMap,
         view: View,
+        range: Range,
         device: Option<&str>,
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Result<Snapshot> {
-        let today = stats::local_day(now, tz);
-        // "All time" starts at the first recorded interval (or is just today if none).
-        let day_count = match view.days() {
-            Some(n) => n,
-            None => match db.earliest_start()? {
-                Some(t) => (today - stats::local_day(t, tz) + 1).max(1),
-                None => 1,
-            },
-        };
-        let first = today - (day_count - 1);
-        // Read from the start of the first day to now.
-        let from = stats::day_start_utc(first, tz);
+        // Read from the start of the first day to the end of the last (or to now).
+        let (from, to) = range.bounds(now, tz);
         let spans: Vec<Span> = db
-            .intervals_between(from, now + 1, device)?
+            .intervals_between(from, to, device)?
             .into_iter()
             .map(|i| Span {
                 start: i.start_ts,
@@ -272,7 +276,7 @@ impl Snapshot {
             })
             .collect();
         let listening: Vec<Span> = db
-            .listening_between(from, now + 1, device)?
+            .listening_between(from, to, device)?
             .into_iter()
             .map(|(player, start, end)| Span {
                 start,
@@ -281,8 +285,31 @@ impl Snapshot {
             })
             .collect();
         Ok(Snapshot::build_days(
-            &spans, &listening, map, view, day_count, now, tz,
+            &spans, &listening, map, view, range, now, tz,
         ))
+    }
+
+    /// `load` for the view's usual period, the one that ends today ("All time" starts at
+    /// the first recorded interval, or is just today if there is none).
+    pub fn load_default(
+        db: &Db,
+        map: &AppMap,
+        view: View,
+        device: Option<&str>,
+        now: i64,
+        tz: &dyn Fn(i64) -> i64,
+    ) -> Result<Snapshot> {
+        let today = stats::local_day(now, tz);
+        let earliest = db.earliest_start()?.map(|t| stats::local_day(t, tz));
+        Snapshot::load(
+            db,
+            map,
+            view,
+            view.rolling_range(today, earliest),
+            device,
+            now,
+            tz,
+        )
     }
 
     /// Work out every number from the spans for the period of `view`.
@@ -296,35 +323,29 @@ impl Snapshot {
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Snapshot {
-        Snapshot::build_days(
-            spans,
-            listening,
-            map,
-            view,
-            view.days().unwrap_or(365),
-            now,
-            tz,
-        )
+        let today = stats::local_day(now, tz);
+        let range = Range::ending(today, view.days().unwrap_or(365));
+        Snapshot::build_days(spans, listening, map, view, range, now, tz)
     }
 
-    /// Like `build`, but for any number of days ending today (used by exports).
+    /// Like `build`, but for any run of days (used by exports and the screens).
     /// `view` only decides whether the day timeline is filled in.
     pub fn build_days(
         spans: &[Span],
         listening: &[Span],
         map: &AppMap,
         view: View,
-        days: i64,
+        range: Range,
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> Snapshot {
         let today = stats::local_day(now, tz);
-        let first = today - (days.max(1) - 1);
+        let (first, last) = (range.first, range.last);
 
         // Per-day raw app totals, the hour grid and the listening per day.
-        let per_day = stats::per_day(spans, first, today, tz);
-        let grid = stats::hour_grid(spans, first, today, tz);
-        let listen_days = stats::per_day(listening, first, today, tz);
+        let per_day = stats::per_day(spans, first, last, tz);
+        let grid = stats::hour_grid(spans, first, last, tz);
+        let listen_days = stats::per_day(listening, first, last, tz);
 
         // Whole-period totals per raw app class, then names and categories.
         let mut raw: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
@@ -365,7 +386,7 @@ impl Snapshot {
         let months = month_rows(&days);
 
         let timeline = if view == View::Today {
-            stats::day_segments(spans, today, tz)
+            stats::day_segments(spans, last, tz)
                 .into_iter()
                 .map(|Segment { start, end, key }| TimelineBlock {
                     start,
@@ -380,6 +401,7 @@ impl Snapshot {
         Snapshot {
             view,
             today,
+            range,
             total: days.iter().map(|d| d.total).sum(),
             categories,
             apps,
@@ -511,10 +533,26 @@ mod tests {
         let now = 50 * 86400 + 100;
         let old = [span(40 * 86400, 40 * 86400 + 500, "zen")];
         // 10 days back is 11 days ago at most: inside 14 days, outside 7.
-        let snap = Snapshot::build_days(&old, &[], &map(), View::Month, 14, now, &utc);
+        let snap = Snapshot::build_days(
+            &old,
+            &[],
+            &map(),
+            View::Month,
+            Range::ending(now / 86400, 14),
+            now,
+            &utc,
+        );
         assert_eq!(snap.days.len(), 14);
         assert_eq!(snap.total, 500);
-        let snap = Snapshot::build_days(&old, &[], &map(), View::Month, 7, now, &utc);
+        let snap = Snapshot::build_days(
+            &old,
+            &[],
+            &map(),
+            View::Month,
+            Range::ending(now / 86400, 7),
+            now,
+            &utc,
+        );
         assert_eq!(snap.total, 0);
     }
 
@@ -531,6 +569,57 @@ mod tests {
             v = v.next();
         }
         assert_eq!(v, View::Today);
+    }
+
+    #[test]
+    fn a_snapshot_remembers_the_days_it_covers() {
+        let now = 100 * 86400 + 5000;
+        let snap = Snapshot::build(&[], &[], &map(), View::Week, now, &utc);
+        assert_eq!(
+            snap.range,
+            Range {
+                first: 94,
+                last: 100
+            }
+        );
+        assert_eq!(snap.days.len(), 7);
+        // A range that ended earlier is read as given, not as "ending today".
+        let past =
+            Snapshot::build_days(&[], &[], &map(), View::Week, Range::new(10, 12), now, &utc);
+        assert_eq!(
+            past.range,
+            Range {
+                first: 10,
+                last: 12
+            }
+        );
+        assert_eq!(
+            past.days.iter().map(|d| d.day).collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+        assert_eq!(past.today, 100);
+        // The rolling windows end today; "All time" starts at the first recorded day.
+        assert_eq!(
+            View::Month.rolling_range(100, None),
+            Range {
+                first: 71,
+                last: 100
+            }
+        );
+        assert_eq!(
+            View::All.rolling_range(100, Some(40)),
+            Range {
+                first: 40,
+                last: 100
+            }
+        );
+        assert_eq!(
+            View::All.rolling_range(100, None),
+            Range {
+                first: 100,
+                last: 100
+            }
+        );
     }
 
     #[test]
@@ -552,7 +641,15 @@ mod tests {
             span(day(2025, 12, 15), day(2025, 12, 15) + 7200, "zen"),
             span(day(2025, 11, 1), day(2025, 11, 1) + 600, "zen"),
         ];
-        let snap = Snapshot::build_days(&spans, &[], &map(), View::Year, 365, now, &utc);
+        let snap = Snapshot::build_days(
+            &spans,
+            &[],
+            &map(),
+            View::Year,
+            Range::ending(now / 86400, 365),
+            now,
+            &utc,
+        );
         assert_eq!(snap.days.len(), 365);
         assert_eq!(snap.total, 3600 + 1800 + 7200);
         let months: Vec<(i32, u32, i64)> = snap
@@ -578,7 +675,7 @@ mod tests {
         let db = Db::open_in_memory("box").unwrap();
         let now = 1_794_225_600; // 2026-11-09 12:00 UTC
                                  // Nothing recorded: just today, nothing to show.
-        let empty = Snapshot::load(&db, &map(), View::All, None, now, &utc).unwrap();
+        let empty = Snapshot::load_default(&db, &map(), View::All, None, now, &utc).unwrap();
         assert_eq!(empty.days.len(), 1);
         assert_eq!(empty.total, 0);
         // Data from 10 days ago: the view reaches back exactly that far.
@@ -592,7 +689,7 @@ mod tests {
             },
         )
         .unwrap();
-        let snap = Snapshot::load(&db, &map(), View::All, None, now, &utc).unwrap();
+        let snap = Snapshot::load_default(&db, &map(), View::All, None, now, &utc).unwrap();
         assert_eq!(snap.days.len(), 11);
         assert!(View::All.by_month() && View::Year.by_month() && !View::Month.by_month());
         assert_eq!(View::All.days(), None);

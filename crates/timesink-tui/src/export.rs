@@ -18,6 +18,7 @@ use timesink_core::stats::{self, Span};
 
 use crate::data::{self, Snapshot, View};
 use crate::palette;
+use crate::period::Range;
 use crate::ui::fmt_duration;
 
 /// The output formats.
@@ -214,7 +215,8 @@ impl ReportData {
                 key: player.clone(),
             })
             .collect();
-        let snap = Snapshot::build_days(&spans, &listen_spans, map, View::Month, days, now, tz);
+        let range = Range::ending(today, days);
+        let snap = Snapshot::build_days(&spans, &listen_spans, map, View::Month, range, now, tz);
 
         // Raw rows, clipped to the period, with their start time for sorting.
         let mut rows: Vec<(i64, RawRow)> = Vec::new();
