@@ -160,7 +160,7 @@ cargo install --path crates/timesink-tui
 timesink
 ```
 
-Seven views (a Sites panel is added when the optional browser extension has recorded website time): **Today** (category and application bars, active time by hour,
+Eight views (a Sites panel is added when the optional browser extension has recorded website time): **Today** (category and application bars, active time by hour,
 a coloured timeline of the day and listening time), **7 days** and **30 days**
 (a day-by-hour heatmap plus the same category and application bars), **Year**
 (the last 365 days) and **All time** (from the first day recorded). Year and All
@@ -169,7 +169,10 @@ and the average per active day in the panel title. **Cal. week** is the calendar
 (Monday to Sunday, up to today) and **Quarter** is the calendar quarter (Jan-Mar,
 Apr-Jun, Jul-Sep, Oct-Dec, up to today); the quarter sums by month like the year. `[` steps
 any view back one period (the day before, the 7 days before, last week, last quarter...) and `]`
-steps forward again; the title names the days you are looking at. Stepping stops at
+steps forward again; the title names the days you are looking at. **Custom** shows two
+dates you type (`c`, or `8` the first time): `2026-10-01 2026-10-31`, or one date for "from
+then until today". A custom range of more than a month sums by month; stepping moves it by
+its own length. The range is not remembered between runs. Stepping stops at
 the present and at the first recorded day. Category
 colours follow the order in which categories first appear in `apps.conf`
 (the current theme's own accents, then deeper and lighter copies), so they stay the same on every
@@ -179,7 +182,8 @@ The Categories and Applications lists can be sorted by time or by name (`s`).
 | Key | Action |
 | --- | --- |
 | `←` `→`, `Tab`, `h` `l` | previous / next view |
-| `1` to `7` | Today / 7 days / 30 days / Year / All time / Cal. week / Quarter |
+| `1` to `8` | Today / 7 days / 30 days / Year / All time / Cal. week / Quarter / Custom |
+| `c` | type the first and last day of the Custom view |
 | `[` `]` | step back / forward one period (a day, a week, a quarter, ...) |
 | `s` | sort the lists by time or by name |
 | `a` | rename an app or move it to another category (or a new one); saved to `apps.conf` |

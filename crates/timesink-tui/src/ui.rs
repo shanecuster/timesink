@@ -16,6 +16,7 @@ use timesink_core::theme::{Rgb, Theme};
 use crate::assign::{self, Assign};
 use crate::banner;
 use crate::data::{DayRow, Snapshot, View};
+use crate::dates::DatePrompt;
 
 /// Everything the screen needs.
 pub struct App {
@@ -53,6 +54,10 @@ pub struct App {
     pub devices: Vec<String>,
     /// Is a sync running in the background?
     pub syncing: bool,
+    /// The range typed for the Custom view (None until one is chosen).
+    pub custom: Option<crate::period::Range>,
+    /// The date prompt, while it is open.
+    pub date_prompt: Option<DatePrompt>,
     /// How many periods back from the current one the view is stepped (0 = now, -1 = the
     /// one before, ...). Changing the view puts it back to 0.
     pub offset: i64,
@@ -232,7 +237,7 @@ impl App {
         if !self.snapshot.sites.is_empty() {
             out.push(Panel::Sites);
         }
-        if self.snapshot.view.by_month() {
+        if self.snapshot.by_month() {
             out.push(Panel::Months);
         }
         out
@@ -277,9 +282,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_tabs(frame, tabs_area, app);
     match app.snapshot.view {
         View::Today => draw_today(frame, body, app),
-        View::Week | View::Month | View::Year | View::All | View::CalWeek | View::Quarter => {
-            draw_range(frame, body, app)
-        }
+        View::Week
+        | View::Month
+        | View::Year
+        | View::All
+        | View::CalWeek
+        | View::Quarter
+        | View::Custom => draw_range(frame, body, app),
     }
     draw_footer(frame, footer, app);
     if app.show_help {
@@ -287,6 +296,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.assign != Assign::Closed {
         draw_assign(frame, area, app);
+    }
+    if let Some(prompt) = &app.date_prompt {
+        draw_date_prompt(frame, area, app, prompt);
     }
 }
 
@@ -390,7 +402,11 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let sync = if app.syncing { " · syncing…" } else { "" };
     // Name the days when they are not simply "the latest": the calendar views and any
     // view that has been stepped back.
-    let period = if app.offset != 0 || matches!(app.snapshot.view, View::CalWeek | View::Quarter) {
+    let period = if app.offset != 0
+        || matches!(
+            app.snapshot.view,
+            View::CalWeek | View::Quarter | View::Custom
+        ) {
         format!(" · {}", app.snapshot.view.label(app.snapshot.range))
     } else {
         String::new()
@@ -434,7 +450,7 @@ fn draw_range(frame: &mut Frame, area: Rect, app: &App) {
     let [map_area, listening_area] =
         Layout::vertical([Constraint::Min(6), Constraint::Length(4)]).areas(left);
     // Too many days to list for a year or longer, so those views sum up by month instead.
-    if app.snapshot.view.by_month() {
+    if app.snapshot.by_month() {
         draw_months(frame, map_area, app);
     } else {
         draw_heatmap(frame, map_area, app);
@@ -870,7 +886,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.notice {
         msg.clone()
     } else {
-        " ←/→ view · [ ] step · s sort · a apps · t theme · b banner · e export · r refresh · ? help · q quit"
+        " ←/→ view · [ ] step · c dates · s sort · a apps · t theme · e export · r refresh · ? help · q quit"
             .to_string()
     };
     // The sync note sits at the right edge, but only where it does not run into the text.
@@ -911,7 +927,7 @@ pub fn sync_note(last_ok: Option<i64>, last_failed: Option<i64>, now: i64) -> Op
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let w = 62.min(area.width);
-    let h = 22.min(area.height);
+    let h = 24.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -920,8 +936,9 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     );
     let text = vec![
         Line::from(" ←/→, Tab, h/l   next / previous view"),
-        Line::from(" 1-7             Today / 7 days / 30 days / Year / All /"),
-        Line::from("                 calendar week / calendar quarter"),
+        Line::from(" 1-8             Today / 7 days / 30 days / Year / All /"),
+        Line::from("                 calendar week / quarter / custom range"),
+        Line::from(" c               choose the days of the custom range"),
         Line::from(" [ ]             step back / forward one period"),
         Line::from(" s               sort by time / by name"),
         Line::from(" p               pick the list the arrow keys scroll"),
@@ -941,6 +958,44 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     ];
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(Paragraph::new(text).block(app.block(" Help ")), rect);
+}
+
+/// The popup for typing a custom range of days.
+fn draw_date_prompt(frame: &mut Frame, area: Rect, app: &App, prompt: &DatePrompt) {
+    let w = 58.min(area.width);
+    let h = 8.min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    let accent = Style::default()
+        .fg(tc(app.theme.accent))
+        .add_modifier(Modifier::BOLD);
+    // The text, then a block as the cursor.
+    let mut lines = vec![
+        Line::from(" First and last day, like 2026-10-01 2026-10-31"),
+        Line::styled(" (one date means: from that day until today)", app.muted()),
+        Line::from(""),
+        Line::styled(format!(" > {}█", prompt.text), accent),
+    ];
+    match &prompt.error {
+        Some(message) => lines.push(Line::styled(
+            format!(" {message}"),
+            Style::default().fg(tc(app.theme.accent)),
+        )),
+        None => lines.push(Line::from("")),
+    }
+    lines.push(Line::styled(
+        " Enter use these days · Esc cancel",
+        app.muted(),
+    ));
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(app.block(" Custom range ")),
+        rect,
+    );
 }
 
 /// The editor popup for application names and categories.
@@ -1127,6 +1182,8 @@ mod tests {
             syncing: false,
             sync_note: None,
             offset: 0,
+            custom: None,
+            date_prompt: None,
         }
     }
 
@@ -1201,12 +1258,34 @@ mod tests {
     }
 
     #[test]
+    fn the_custom_view_names_its_days_and_the_prompt_asks_for_them() {
+        let mut app = sample_app(View::Custom);
+        app.custom = Some(Range::new(app.snapshot.today - 9, app.snapshot.today));
+        app.snapshot.range = app.custom.unwrap();
+        let label = View::Custom.label(app.snapshot.range);
+        assert!(render(&app, 120, 40).contains(&label), "{label}");
+        assert!(render(&app, 120, 40).contains("Custom"));
+        // The prompt shows what has been typed, and why an entry was refused.
+        app.date_prompt = Some(DatePrompt {
+            text: "2026-10-01".into(),
+            error: Some("that range starts in the future".into()),
+        });
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("Custom range"));
+        assert!(screen.contains("> 2026-10-01"));
+        assert!(screen.contains("starts in the future"));
+        // A small terminal must not panic.
+        let _ = render(&app, 40, 10);
+    }
+
+    #[test]
     fn help_lists_the_new_keys() {
         let mut app = sample_app(View::Today);
         app.show_help = true;
         let screen = render(&app, 120, 40);
-        assert!(screen.contains("1-7"));
+        assert!(screen.contains("1-8"));
         assert!(screen.contains("step back / forward"));
+        assert!(screen.contains("custom range"));
     }
 
     #[test]
@@ -1347,6 +1426,8 @@ mod tests {
             syncing: false,
             sync_note: None,
             offset: 0,
+            custom: None,
+            date_prompt: None,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));

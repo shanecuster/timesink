@@ -5,6 +5,7 @@ mod banner;
 mod cli;
 mod commands;
 mod data;
+mod dates;
 mod export;
 mod palette;
 mod period;
@@ -149,6 +150,8 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         syncing: false,
         sync_note: None,
         offset: 0,
+        custom: None,
+        date_prompt: None,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -214,6 +217,23 @@ fn run(
                 // Any key clears the last notice (for example "Wrote ...").
                 app.notice = None;
 
+                // While the date prompt is open it gets every key too.
+                if let Some(prompt) = app.date_prompt.as_mut() {
+                    let today = timesink_core::stats::local_day(now_ts(), &local_offset);
+                    match dates::handle_key(prompt, key, today) {
+                        dates::Outcome::Open => {}
+                        dates::Outcome::Cancelled => app.date_prompt = None,
+                        dates::Outcome::Chosen(range) => {
+                            app.date_prompt = None;
+                            app.custom = Some(range);
+                            app.offset = 0;
+                            reload(app, db, map, View::Custom);
+                            last_refresh = Instant::now();
+                        }
+                    }
+                    continue;
+                }
+
                 // While the app editor is open it gets every key (so typing "q" in a name
                 // does not quit).
                 if app.assign != assign::Assign::Closed {
@@ -260,11 +280,26 @@ fn run(
                     KeyCode::Char('5') => Some(View::All),
                     KeyCode::Char('6') => Some(View::CalWeek),
                     KeyCode::Char('7') => Some(View::Quarter),
+                    KeyCode::Char('8') => {
+                        // The first time there is nothing to show yet, so ask for the days.
+                        if app.custom.is_none() {
+                            app.date_prompt = Some(dates::DatePrompt::default());
+                        }
+                        Some(View::Custom)
+                    }
+                    KeyCode::Char('c') => {
+                        // Start from the range already chosen, if any, so it can be edited.
+                        app.date_prompt = Some(match app.custom {
+                            Some(range) => dates::DatePrompt::starting_with(range),
+                            None => dates::DatePrompt::default(),
+                        });
+                        None
+                    }
                     KeyCode::Char(c @ ('[' | ']')) => {
                         // `[` goes back one period, `]` forward again.
                         let delta = if c == '[' { -1 } else { 1 };
                         let today = timesink_core::stats::local_day(now_ts(), &local_offset);
-                        match view.step(app.offset, delta, today, earliest_day(db)) {
+                        match view.step(app.offset, delta, today, earliest_day(db), app.custom) {
                             Some(offset) => {
                                 app.offset = offset;
                                 keep_offset = true;
@@ -520,7 +555,7 @@ fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     }
     let tz = &local_offset;
     let today = timesink_core::stats::local_day(now_ts(), tz);
-    let range = view.range(app.offset, today, earliest_day(db));
+    let range = view.range(app.offset, today, earliest_day(db), app.custom);
     match Snapshot::load(db, map, view, range, app.device.as_deref(), now_ts(), tz) {
         Ok(snapshot) => {
             app.snapshot = snapshot;
