@@ -98,7 +98,7 @@ up yet, and reconnects if they go away. The database is
 
 - `crates/timesink-core`: data model, title parsing, privacy rules, presence, tracker, SQLite storage.
 - `crates/timesink-daemon`: Hyprland, idle, logind and media watchers plus the `run` / `report` commands.
-- `contrib/`: the systemd user service file.
+- `contrib/`: the systemd user service and sync timer files, and example config files.
 
 ## Checks
 
@@ -347,9 +347,21 @@ downloads everyone else's, so nothing can conflict.
 2. `timesink sync` uploads the days that changed and downloads the other
    computers' days. `timesink sync status` shows what is configured and what is
    waiting, without contacting the server.
-3. Press `S` in the interface to sync in the background, or run it on a timer. A
-   systemd user timer (`~/.config/systemd/user/timesink-sync.timer` with
-   `OnUnitActiveSec=5min`, and a service that runs `timesink sync`) works well.
+3. Press `S` in the interface to sync in the background, or sync automatically with
+   the systemd user timer in `contrib/` (every 5 minutes, starting 2 minutes after
+   login). It is off until you enable it, on each computer you want to sync:
+
+   ```
+   mkdir -p ~/.config/systemd/user
+   cp contrib/timesink-sync.service contrib/timesink-sync.timer ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now timesink-sync.timer
+   ```
+
+   `journalctl --user -u timesink-sync -n 20` shows the latest runs, and
+   `systemctl --user disable --now timesink-sync.timer` turns it off. A run that cannot
+   reach the server (say the computer is off the tailnet) just fails and tries again
+   at the next interval; nothing is lost.
 4. In the interface, `d` switches between all computers combined (the default; time
    that overlaps across computers is added up) and each computer alone.
 

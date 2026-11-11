@@ -1,0 +1,12 @@
+# systemd user service that runs one sync with CouchDB. The timer next to it starts it.
+# Needs ~/.config/timesink/sync.conf (see sync.conf.example); without it each run just
+# fails with a message in the journal and nothing is sent anywhere.
+[Unit]
+Description=timesink sync with CouchDB
+
+[Service]
+Type=oneshot
+# %h is your home folder. Change this if the binary lives somewhere else.
+ExecStart=%h/.cargo/bin/timesink sync
+# One sync should take seconds; give up if the server hangs so runs never pile up.
+TimeoutStartSec=120

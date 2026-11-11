@@ -1,0 +1,22 @@
+# systemd user timer: sync a couple of minutes after login, then every 5 minutes.
+#
+# Install (one time, on each computer that should sync):
+#   cargo install --path crates/timesink-tui           # puts `timesink` in ~/.cargo/bin
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/timesink-sync.service contrib/timesink-sync.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now timesink-sync.timer
+#
+# Check it:   systemctl --user list-timers timesink-sync.timer
+# Watch logs: journalctl --user -u timesink-sync -n 20
+# Turn it off: systemctl --user disable --now timesink-sync.timer
+[Unit]
+Description=Run timesink sync every few minutes
+
+[Timer]
+OnBootSec=2min
+# Counted from when the last run finished, so a slow or failing run is never overlapped.
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
