@@ -10,3 +10,7 @@ anyhow = "1"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 # serde_json: builds and reads the per-day documents that are synced to CouchDB.
 serde_json = "1"
+# chrono: calendar arithmetic only (week, quarter and month names). The default features
+# are off, so there is no time-zone or clock code: the caller passes the zone in, which
+# keeps this crate usable on Android as well.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }

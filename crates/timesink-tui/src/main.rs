@@ -8,7 +8,6 @@ mod data;
 mod dates;
 mod export;
 mod palette;
-mod period;
 mod sync;
 mod ui;
 
@@ -94,7 +93,10 @@ fn start() -> Result<()> {
             let span = match from {
                 Some(first) => {
                     let today = timesink_core::stats::local_day(now_ts(), &local_offset);
-                    commands::ExportSpan::Between(period::Range::new(first, to.unwrap_or(today)))
+                    commands::ExportSpan::Between(timesink_core::period::Range::new(
+                        first,
+                        to.unwrap_or(today),
+                    ))
                 }
                 None => commands::ExportSpan::Last(days),
             };

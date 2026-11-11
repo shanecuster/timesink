@@ -18,8 +18,8 @@ use timesink_core::stats::{self, Span};
 
 use crate::data::{self, Snapshot, View};
 use crate::palette;
-use crate::period::Range;
 use crate::ui::fmt_duration;
+use timesink_core::period::Range;
 
 /// The output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -55,7 +55,7 @@ pub struct App {
     /// Is a sync running in the background?
     pub syncing: bool,
     /// The range typed for the Custom view (None until one is chosen).
-    pub custom: Option<crate::period::Range>,
+    pub custom: Option<timesink_core::period::Range>,
     /// The date prompt, while it is open.
     pub date_prompt: Option<DatePrompt>,
     /// How many periods back from the current one the view is stepped (0 = now, -1 = the
@@ -1117,10 +1117,10 @@ fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::data::{Snapshot, View};
-    use crate::period::Range;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use timesink_core::appmap::AppMap;
+    use timesink_core::period::Range;
     use timesink_core::stats::Span as TimeSpan;
 
     /// UTC for the tests.

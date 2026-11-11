@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use crate::export::Format;
-use crate::period;
+use timesink_core::period;
 
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]

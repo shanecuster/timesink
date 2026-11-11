@@ -6,7 +6,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::period::{self, Range};
+use timesink_core::period::{self, Range};
 
 /// Longest text the prompt will take (two dates with a word between fit easily).
 const MAX_TEXT: usize = 40;

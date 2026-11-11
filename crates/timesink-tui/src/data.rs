@@ -10,7 +10,7 @@ use timesink_core::domains::{self, DomainConfig};
 use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Segment, Span};
 
-use crate::period::{self, Range};
+use timesink_core::period::{self, Range};
 
 /// Which period is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

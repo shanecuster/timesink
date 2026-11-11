@@ -4,8 +4,8 @@
 //! zone, the same numbers `timesink_core::stats` uses), so none of it needs a database or
 //! a clock; the caller passes today's day number in.
 
+use crate::stats;
 use chrono::{Datelike, NaiveDate};
-use timesink_core::stats;
 
 /// Days from 0001-01-01 (the "common era" count chrono uses) to 1970-01-01.
 const UNIX_DAY_FROM_CE: i64 = 719_163;
@@ -36,6 +36,8 @@ impl Range {
         }
     }
 
+    // A range always holds at least one day, so an `is_empty` method would be pointless.
+    #[allow(clippy::len_without_is_empty)]
     /// How many days it covers.
     pub fn len(&self) -> i64 {
         self.last - self.first + 1
