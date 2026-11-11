@@ -51,6 +51,10 @@ idle_timeout_minutes = 5
 # how much of a terminal window to record: app, program (default) or program_dir
 terminal_detail = program
 
+# yes: no input for the idle time stops focus time even while media is playing
+# (listening time still counts in full). no (default): playing media keeps you counted.
+idle_ignores_media = no
+
 # window classes (comma separated) allowed to record full titles. Empty by default.
 keep_titles =
 ```
@@ -141,7 +145,7 @@ so `report` lists it separately and never adds it to the totals above it.
 
 Only the player's short name is stored (for example `cider`), never track,
 artist or video titles. If the machine sleeps, listening stops at that moment.
-Playing media still counts you as present when you are away from the keyboard.
+By default, playing media still counts you as present when you are away from the keyboard. Set `idle_ignores_media = yes` in `config.conf` to stop focus time at the idle timeout even while something plays; listening time is unaffected.
 
 This needs database layout version 2. The first start after upgrading copies
 your existing database to `timesink.db.bak-v1` before changing anything.

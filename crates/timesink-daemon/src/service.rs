@@ -310,11 +310,13 @@ pub fn run(verbose: bool) -> Result<()> {
     let recorder = Recorder::new(Db::open(&path, &paths::device_id())?);
     eprintln!("timesink: recording to {}", path.display());
 
+    let mut presence = Presence::new();
+    presence.set_ignore_media_for_idle(config.idle_ignores_media);
     let mut service = Service {
         sanitizer,
         tracker: Tracker::new(),
         recorder,
-        presence: Presence::new(),
+        presence,
         last_presence: PresenceState::Active,
         hypr: None,
         listen: ListenTracker::new(),
@@ -329,6 +331,9 @@ pub fn run(verbose: bool) -> Result<()> {
         "timesink: idle after {} minutes without input",
         config.idle_timeout_secs / 60
     );
+    if config.idle_ignores_media {
+        eprintln!("timesink: idle stops focus time even while media plays");
+    }
     idle::spawn(tx.clone(), config.idle_timeout_secs);
     logind::spawn(tx.clone());
     media::spawn(tx.clone());

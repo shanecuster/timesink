@@ -3,6 +3,8 @@
 //! Several independent sources can say "away": the compositor's idle timer,
 //! suspend, and the lock screen. Playing audio or video overrides ONLY the idle
 //! timer (you may be watching without touching the keyboard), never sleep or lock.
+//! That can be switched off (`idle_ignores_media` in `config.conf`), so that being idle
+//! always means away even while something plays; listening time is unaffected.
 //!
 //! Like the tracker, this is a pure state machine: the daemon feeds it events
 //! with timestamps and asks for the current `PresenceState`.
@@ -29,12 +31,21 @@ pub struct Presence {
     media_playing: bool,
     /// The last time we knew media was playing (used to end idle time correctly).
     last_media_ts: i64,
+    /// When true, idle means away even while media plays (the default is false: playing
+    /// media keeps you counted as present).
+    ignore_media_for_idle: bool,
 }
 
 impl Presence {
     /// Create a presence tracker that starts out `Active`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Choose whether playing media keeps you present while idle. `true` means media is
+    /// ignored for idle: no input for the idle timeout always counts as away.
+    pub fn set_ignore_media_for_idle(&mut self, ignore: bool) {
+        self.ignore_media_for_idle = ignore;
     }
 
     /// The compositor says there has been no input since `since`.
@@ -92,8 +103,11 @@ impl Presence {
         // Idle counts as away unless media is playing. When it does apply, the
         // away time starts at the last input OR the last time media was playing,
         // whichever is later, so time spent watching is not thrown away.
+        // If media is set to be ignored, idle always counts, from the last input.
         if let Some(idle_since) = self.idle_since {
-            if !self.media_playing {
+            if self.ignore_media_for_idle {
+                earliest = Some(earliest.map_or(idle_since, |e| e.min(idle_since)));
+            } else if !self.media_playing {
                 let since = idle_since.max(self.last_media_ts);
                 earliest = Some(earliest.map_or(since, |e| e.min(since)));
             }
@@ -130,6 +144,30 @@ mod tests {
         p.media_changed(500, true);
         p.idle_started(700);
         assert_eq!(p.state(), PresenceState::Active);
+    }
+
+    #[test]
+    fn media_can_be_set_to_not_override_idle() {
+        let mut p = Presence::new();
+        p.set_ignore_media_for_idle(true);
+        p.media_changed(500, true);
+        p.heartbeat(900);
+        p.idle_started(700);
+        // Away from the last input, even though media is still playing.
+        assert_eq!(p.state(), PresenceState::Away { since: 700 });
+        // Input returns: present again.
+        p.idle_ended();
+        assert_eq!(p.state(), PresenceState::Active);
+    }
+
+    #[test]
+    fn ignoring_media_does_not_move_the_away_time_when_it_stops() {
+        let mut p = Presence::new();
+        p.set_ignore_media_for_idle(true);
+        p.idle_started(700);
+        p.media_changed(1650, true);
+        p.media_changed(1700, false);
+        assert_eq!(p.state(), PresenceState::Away { since: 700 });
     }
 
     #[test]

@@ -11,6 +11,10 @@
 //! # how much of a terminal window to record: app, program or program_dir
 //! terminal_detail = program
 //!
+//! # yes: no input for the idle time stops focus time even while media plays
+//! # (listening time still counts). no (default): playing media keeps you counted.
+//! idle_ignores_media = no
+//!
 //! # window classes (comma separated) whose full titles may be recorded.
 //! # Empty by default: every other app is recorded as just the app.
 //! keep_titles =
@@ -48,6 +52,8 @@ impl TerminalDetail {
 pub struct Config {
     /// Seconds without keyboard or mouse input before you count as away.
     pub idle_timeout_secs: i64,
+    /// Should idle stop focus time even while media is playing? (Default: no.)
+    pub idle_ignores_media: bool,
     /// How much of a terminal window to record.
     pub terminal_detail: TerminalDetail,
     /// Lowercase window classes whose full title may be recorded (usually none).
@@ -58,6 +64,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            idle_ignores_media: false,
             terminal_detail: TerminalDetail::default(),
             keep_titles: Vec::new(),
         }
@@ -83,6 +90,14 @@ impl Config {
                         if minutes >= 1 {
                             config.idle_timeout_secs = minutes * 60;
                         }
+                    }
+                }
+                "idle_ignores_media" => {
+                    // Only clear yes/no words change it; anything else keeps the default.
+                    match value.trim().to_lowercase().as_str() {
+                        "yes" | "true" | "on" | "1" => config.idle_ignores_media = true,
+                        "no" | "false" | "off" | "0" => config.idle_ignores_media = false,
+                        _ => {}
                     }
                 }
                 "terminal_detail" => {
@@ -115,6 +130,21 @@ mod tests {
         assert_eq!(c.terminal_detail, TerminalDetail::Program);
         assert!(c.keep_titles.is_empty());
         assert_eq!(Config::from_conf(""), c);
+    }
+
+    #[test]
+    fn idle_ignores_media_is_off_unless_clearly_turned_on() {
+        assert!(!Config::default().idle_ignores_media);
+        for on in ["yes", "true", "ON", " 1 "] {
+            let c = Config::from_conf(&format!("idle_ignores_media = {on}\n"));
+            assert!(c.idle_ignores_media, "{on}");
+        }
+        // A later "no" turns it back off, and nonsense leaves the default.
+        assert!(
+            !Config::from_conf("idle_ignores_media = yes\nidle_ignores_media = no\n")
+                .idle_ignores_media
+        );
+        assert!(!Config::from_conf("idle_ignores_media = maybe\n").idle_ignores_media);
     }
 
     #[test]
