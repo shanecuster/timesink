@@ -271,8 +271,8 @@ fn run(
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(())
                     }
-                    KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => Some(view.next()),
-                    KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => Some(view.prev()),
+                    KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => view.next(),
+                    KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => view.prev(),
                     KeyCode::Char('1') => Some(View::Today),
                     KeyCode::Char('2') => Some(View::Week),
                     KeyCode::Char('3') => Some(View::Month),

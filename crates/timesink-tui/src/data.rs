@@ -136,16 +136,16 @@ impl View {
         }
     }
 
-    /// The next tab, wrapping round.
-    pub fn next(self) -> View {
+    /// The next tab, or `None` at the last one (the tabs do not wrap round).
+    pub fn next(self) -> Option<View> {
         let i = View::ALL.iter().position(|v| *v == self).unwrap_or(0);
-        View::ALL[(i + 1) % View::ALL.len()]
+        View::ALL.get(i + 1).copied()
     }
 
-    /// The previous tab, wrapping round.
-    pub fn prev(self) -> View {
+    /// The previous tab, or `None` at the first one (the tabs do not wrap round).
+    pub fn prev(self) -> Option<View> {
         let i = View::ALL.iter().position(|v| *v == self).unwrap_or(0);
-        View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()]
+        i.checked_sub(1).map(|j| View::ALL[j])
     }
 }
 
@@ -630,20 +630,19 @@ mod tests {
     }
 
     #[test]
-    fn tabs_cycle_both_ways() {
-        assert_eq!(View::Today.next(), View::Week);
-        assert_eq!(View::Month.next(), View::Year);
-        assert_eq!(View::Year.next(), View::All);
-        assert_eq!(View::All.next(), View::CalWeek);
-        assert_eq!(View::Quarter.next(), View::Custom);
-        assert_eq!(View::Custom.next(), View::Today);
-        assert_eq!(View::Today.prev(), View::Custom);
-        // Going round the whole circle both ways comes back to the start.
-        let mut v = View::Today;
-        for _ in View::ALL {
-            v = v.next();
-        }
-        assert_eq!(v, View::Today);
+    fn tabs_step_one_at_a_time() {
+        assert_eq!(View::Today.next(), Some(View::Week));
+        assert_eq!(View::Month.next(), Some(View::Year));
+        assert_eq!(View::All.next(), Some(View::CalWeek));
+        assert_eq!(View::Quarter.next(), Some(View::Custom));
+        assert_eq!(View::Custom.prev(), Some(View::Quarter));
+    }
+
+    #[test]
+    fn tabs_stop_at_both_ends() {
+        // Neither end wraps round to the other.
+        assert_eq!(View::Custom.next(), None);
+        assert_eq!(View::Today.prev(), None);
     }
 
     #[test]
@@ -698,18 +697,18 @@ mod tests {
     }
 
     #[test]
-    fn tabs_cycle_through_every_view_and_back() {
+    fn tabs_walk_through_every_view_and_back() {
         let mut v = View::Today;
-        let mut seen = Vec::new();
-        for _ in 0..View::ALL.len() {
-            seen.push(v);
-            v = v.next();
+        let mut seen = vec![v];
+        while let Some(n) = v.next() {
+            seen.push(n);
+            v = n;
         }
         assert_eq!(seen, View::ALL.to_vec());
-        assert_eq!(v, View::Today, "the cycle wraps to the start");
-        assert_eq!(View::Today.prev(), View::Custom);
         for view in View::ALL {
-            assert_eq!(view.next().prev(), view);
+            if let Some(n) = view.next() {
+                assert_eq!(n.prev(), Some(view));
+            }
         }
     }
 
