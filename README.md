@@ -100,7 +100,8 @@ up yet, and reconnects if they go away. The database is
 
 ## Layout
 
-- `crates/timesink-core`: data model, title parsing, privacy rules, presence, tracker, SQLite storage.
+- `crates/timesink-core`: data model, title parsing, privacy rules, presence, tracker, SQLite storage, and the views, periods and day totals every screen is built from. It has no terminal code, so the Android app can reuse it.
+- `crates/timesink-sync`: CouchDB sync (the logic and its HTTP client), also shared with the Android app.
 - `crates/timesink-daemon`: Hyprland, idle, logind and media watchers plus the `run` / `report` commands.
 - `contrib/`: the systemd user service and sync timer files, and example config files.
 
