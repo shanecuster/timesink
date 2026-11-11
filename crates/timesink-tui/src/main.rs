@@ -84,12 +84,22 @@ fn start() -> Result<()> {
         cli::Command::Export {
             format,
             days,
+            from,
+            to,
             out,
             force,
         } => {
+            // An explicit range wins; its end defaults to today.
+            let span = match from {
+                Some(first) => {
+                    let today = timesink_core::stats::local_day(now_ts(), &local_offset);
+                    commands::ExportSpan::Between(period::Range::new(first, to.unwrap_or(today)))
+                }
+                None => commands::ExportSpan::Last(days),
+            };
             let request = commands::ExportRequest {
                 format,
-                days,
+                span,
                 out: out.as_deref(),
                 force,
             };
@@ -138,6 +148,7 @@ fn run_interface(db: Db, mut map: AppMap) -> Result<()> {
         devices: db.devices().unwrap_or_default(),
         syncing: false,
         sync_note: None,
+        offset: 0,
         export_menu: false,
         notice: None,
         show_help: false,
@@ -227,11 +238,14 @@ fn run(
                         _ => None, // Esc or anything else cancels
                     };
                     if let Some(format) = format {
-                        app.notice = Some(export_view(db, map, format, view));
+                        app.notice = Some(export_view(db, map, format, app));
                     }
                     continue;
                 }
 
+                // Stepping, refreshing and switching computer stay on the period being
+                // looked at; picking a view starts again at its current period.
+                let mut keep_offset = false;
                 let new_view = match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -244,6 +258,33 @@ fn run(
                     KeyCode::Char('3') => Some(View::Month),
                     KeyCode::Char('4') => Some(View::Year),
                     KeyCode::Char('5') => Some(View::All),
+                    KeyCode::Char('6') => Some(View::CalWeek),
+                    KeyCode::Char('7') => Some(View::Quarter),
+                    KeyCode::Char(c @ ('[' | ']')) => {
+                        // `[` goes back one period, `]` forward again.
+                        let delta = if c == '[' { -1 } else { 1 };
+                        let today = timesink_core::stats::local_day(now_ts(), &local_offset);
+                        match view.step(app.offset, delta, today, earliest_day(db)) {
+                            Some(offset) => {
+                                app.offset = offset;
+                                keep_offset = true;
+                                Some(view)
+                            }
+                            None => {
+                                app.notice = Some(
+                                    if delta < 0 && view != View::All {
+                                        " no earlier data"
+                                    } else if view == View::All {
+                                        " all time is one period"
+                                    } else {
+                                        " already at the latest"
+                                    }
+                                    .into(),
+                                );
+                                None
+                            }
+                        }
+                    }
                     KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
                         None
@@ -274,7 +315,10 @@ fn run(
                         save_settings(app);
                         None
                     }
-                    KeyCode::Char('r') => Some(view),
+                    KeyCode::Char('r') => {
+                        keep_offset = true;
+                        Some(view)
+                    }
                     KeyCode::Char('d') => {
                         app.devices = db.devices().unwrap_or_default();
                         if app.devices.len() < 2 {
@@ -282,6 +326,7 @@ fn run(
                             None
                         } else {
                             app.device = next_device(&app.devices, app.device.as_deref());
+                            keep_offset = true;
                             Some(view)
                         }
                     }
@@ -327,6 +372,9 @@ fn run(
                     _ => None,
                 };
                 if let Some(v) = new_view {
+                    if !keep_offset {
+                        app.offset = 0;
+                    }
                     reload(app, db, map, v);
                     last_refresh = Instant::now();
                 }
@@ -376,11 +424,18 @@ fn save_settings(app: &mut App) {
 }
 
 /// Write the report for the period on screen and describe what happened.
-fn export_view(db: &Db, map: &AppMap, format: Format, view: View) -> String {
+fn export_view(db: &Db, map: &AppMap, format: Format, app: &App) -> String {
+    let view = app.snapshot.view;
+    // The usual rolling views (not stepped back) keep their short names ("week", "month");
+    // "All time" means everything recorded; anything else is exported by its exact days.
+    let span = match view.days() {
+        Some(days) if app.offset == 0 => commands::ExportSpan::Last(days),
+        _ if view == View::All => commands::ExportSpan::Last(0),
+        _ => commands::ExportSpan::Between(app.snapshot.range),
+    };
     let request = commands::ExportRequest {
         format,
-        // 0 means "everything recorded" (the All time view).
-        days: view.days().unwrap_or(0),
+        span,
         out: None,
         force: false,
     };
@@ -443,6 +498,14 @@ fn start_sync() -> mpsc::Receiver<String> {
     rx
 }
 
+/// The first day anything was recorded (a local day number), if anything was.
+fn earliest_day(db: &Db) -> Option<i64> {
+    db.earliest_start()
+        .ok()
+        .flatten()
+        .map(|t| timesink_core::stats::local_day(t, &local_offset))
+}
+
 /// Recompute the numbers. A failure is shown in the footer, not fatal.
 fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     app.devices = db.devices().unwrap_or_default();
@@ -455,14 +518,10 @@ fn reload(app: &mut App, db: &Db, map: &AppMap, view: View) {
     {
         app.device = None;
     }
-    match Snapshot::load_default(
-        db,
-        map,
-        view,
-        app.device.as_deref(),
-        now_ts(),
-        &local_offset,
-    ) {
+    let tz = &local_offset;
+    let today = timesink_core::stats::local_day(now_ts(), tz);
+    let range = view.range(app.offset, today, earliest_day(db));
+    match Snapshot::load(db, map, view, range, app.device.as_deref(), now_ts(), tz) {
         Ok(snapshot) => {
             app.snapshot = snapshot;
             app.status = None;

@@ -53,6 +53,9 @@ pub struct App {
     pub devices: Vec<String>,
     /// Is a sync running in the background?
     pub syncing: bool,
+    /// How many periods back from the current one the view is stepped (0 = now, -1 = the
+    /// one before, ...). Changing the view puts it back to 0.
+    pub offset: i64,
     /// How the last sync went ("synced 2m ago"), shown at the right of the footer.
     /// None when this computer has never synced.
     pub sync_note: Option<String>,
@@ -274,7 +277,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_tabs(frame, tabs_area, app);
     match app.snapshot.view {
         View::Today => draw_today(frame, body, app),
-        View::Week | View::Month | View::Year | View::All => draw_range(frame, body, app),
+        View::Week | View::Month | View::Year | View::All | View::CalWeek | View::Quarter => {
+            draw_range(frame, body, app)
+        }
     }
     draw_footer(frame, footer, app);
     if app.show_help {
@@ -333,6 +338,10 @@ fn draw_banner(frame: &mut Frame, area: Rect, app: &App, size: banner::Size) {
     if per_hour == 0 {
         return;
     }
+    // The chart is today's, so it is left out when looking at a period in the past.
+    if !snap.is_live() {
+        return;
+    }
     let hours = snap.days.last().map(|d| d.hours).unwrap_or([0; 24]);
     let max = hours.iter().copied().max().unwrap_or(0);
     let now_hour = (snap.now_secs / 3600).clamp(0, 23) as usize;
@@ -379,8 +388,15 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         (None, false) => String::new(),
     };
     let sync = if app.syncing { " · syncing…" } else { "" };
+    // Name the days when they are not simply "the latest": the calendar views and any
+    // view that has been stepped back.
+    let period = if app.offset != 0 || matches!(app.snapshot.view, View::CalWeek | View::Quarter) {
+        format!(" · {}", app.snapshot.view.label(app.snapshot.range))
+    } else {
+        String::new()
+    };
     let title = format!(
-        " timesink · {} active{scope}{sync} ",
+        " timesink · {} active{period}{scope}{sync} ",
         fmt_duration(app.snapshot.total)
     );
     let tabs = Tabs::new(titles)
@@ -656,7 +672,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
                 best = Some((cat, t));
             }
         }
-        let is_now = snap.now_secs >= from && snap.now_secs < to;
+        let is_now = snap.is_live() && snap.now_secs >= from && snap.now_secs < to;
         cells.push(match best {
             Some((cat, _)) => Span::styled("█", Style::default().fg(app.color_of(cat))),
             None if is_now => Span::styled("│", Style::default().fg(tc(app.theme.fg))),
@@ -854,7 +870,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.notice {
         msg.clone()
     } else {
-        " ←/→ view · s sort · a apps · t theme · b banner · e export · r refresh · ? help · q quit"
+        " ←/→ view · [ ] step · s sort · a apps · t theme · b banner · e export · r refresh · ? help · q quit"
             .to_string()
     };
     // The sync note sits at the right edge, but only where it does not run into the text.
@@ -895,7 +911,7 @@ pub fn sync_note(last_ok: Option<i64>, last_failed: Option<i64>, now: i64) -> Op
 /// A small box listing the keys.
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let w = 62.min(area.width);
-    let h = 19.min(area.height);
+    let h = 22.min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -904,7 +920,9 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     );
     let text = vec![
         Line::from(" ←/→, Tab, h/l   next / previous view"),
-        Line::from(" 1-5             Today / 7 days / 30 days / Year / All"),
+        Line::from(" 1-7             Today / 7 days / 30 days / Year / All /"),
+        Line::from("                 calendar week / calendar quarter"),
+        Line::from(" [ ]             step back / forward one period"),
         Line::from(" s               sort by time / by name"),
         Line::from(" p               pick the list the arrow keys scroll"),
         Line::from(" ↑/↓, PgUp/PgDn  scroll that list (Home/End: top/bottom)"),
@@ -1044,6 +1062,7 @@ fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::data::{Snapshot, View};
+    use crate::period::Range;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use timesink_core::appmap::AppMap;
@@ -1107,6 +1126,7 @@ mod tests {
             devices: Vec::new(),
             syncing: false,
             sync_note: None,
+            offset: 0,
         }
     }
 
@@ -1134,6 +1154,59 @@ mod tests {
         assert!(render(&app, 120, 40).contains("synced 2m ago"));
         // Too narrow for both: the key hints win.
         assert!(!render(&app, 70, 40).contains("synced 2m ago"));
+    }
+
+    #[test]
+    fn every_view_has_a_tab_and_draws_without_trouble() {
+        let screen = render(&sample_app(View::CalWeek), 120, 40);
+        for view in View::ALL {
+            assert!(screen.contains(view.title()), "tab {}", view.title());
+        }
+        for view in [View::CalWeek, View::Quarter] {
+            let screen = render(&sample_app(view), 120, 40);
+            assert!(screen.contains("Categories"), "{view:?}");
+        }
+        // The quarter sums by month, like the year does.
+        assert!(render(&sample_app(View::Quarter), 120, 40).contains("Active time by month"));
+    }
+
+    #[test]
+    fn the_title_names_the_days_for_calendar_views_and_stepped_views() {
+        // The calendar views always say which days they show...
+        let mut app = sample_app(View::CalWeek);
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains(&View::CalWeek.label(app.snapshot.range)));
+        // ...a rolling view only once it has been stepped back.
+        app = sample_app(View::Week);
+        assert!(!render(&app, 120, 40).contains(" · Nov "));
+        app.offset = -1;
+        app.snapshot.range = Range::new(app.snapshot.today - 13, app.snapshot.today - 7);
+        let label = View::Week.label(app.snapshot.range);
+        assert!(render(&app, 120, 40).contains(&label), "{label}");
+    }
+
+    #[test]
+    fn a_past_period_has_no_todays_chart_in_the_banner() {
+        let mut app = sample_app(View::Week);
+        let live = render(&app, 120, 40);
+        // Today's sparkline is drawn at the right edge of the banner (the underlined "now"
+        // hour has block glyphs); once the period is in the past the banner is just the
+        // name and the date.
+        app.offset = -1;
+        app.snapshot.range = Range::new(app.snapshot.today - 13, app.snapshot.today - 7);
+        let past = render(&app, 120, 40);
+        let top = |s: &str| s.lines().take(8).collect::<Vec<_>>().join("\n");
+        assert_ne!(top(&live), top(&past));
+        assert!(!app.snapshot.is_live());
+    }
+
+    #[test]
+    fn help_lists_the_new_keys() {
+        let mut app = sample_app(View::Today);
+        app.show_help = true;
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("1-7"));
+        assert!(screen.contains("step back / forward"));
     }
 
     #[test]
@@ -1273,6 +1346,7 @@ mod tests {
             devices: Vec::new(),
             syncing: false,
             sync_note: None,
+            offset: 0,
         };
         let screen = render(&app, 100, 30);
         assert!(screen.contains("nothing recorded yet"));

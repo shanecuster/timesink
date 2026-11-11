@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use crate::export::Format;
+use crate::period;
 
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,8 +21,12 @@ pub enum Command {
     Export {
         /// File format.
         format: Format,
-        /// Number of days, ending today.
+        /// Number of days, ending today (0 = everything recorded).
         days: i64,
+        /// First day of an explicit range (local day number); with it, `days` is ignored.
+        from: Option<i64>,
+        /// Last day of an explicit range; today when `from` is given without it.
+        to: Option<i64>,
         /// Where to write; the default folder is used when absent.
         out: Option<PathBuf>,
         /// Replace an existing file.
@@ -64,6 +69,8 @@ EXPORT OPTIONS
   -f, --format FORMAT   csv, json, md or html           (default: html)
   -p, --period PERIOD   today, week, month, year or all (default: week)
       --days N          last N days instead of a period
+      --from DATE       a range of days instead: first day, as YYYY-MM-DD
+      --to DATE         last day of that range (default: today)
   -o, --out PATH        a file (name with an extension) or a folder
       --force           replace an existing file
 
@@ -108,6 +115,9 @@ fn value<'a>(args: &'a [String], i: usize, name: &str) -> Result<&'a str, String
 fn parse_export(args: &[String]) -> Result<Command, String> {
     let mut format = Format::Html;
     let mut days = 7;
+    let (mut from, mut to) = (None, None);
+    // Was a period or a day count given? (It cannot be combined with --from / --to.)
+    let mut period_given = false;
     let mut out = None;
     let mut force = false;
     let mut i = 0;
@@ -120,7 +130,20 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
                 })?;
                 i += 1;
             }
+            "--from" | "--to" => {
+                let name = args[i].clone();
+                let text = value(args, i, &name)?;
+                let day = period::parse_date(text)
+                    .ok_or_else(|| format!("{name} needs a date like 2026-11-03, not '{text}'"))?;
+                if name == "--from" {
+                    from = Some(day);
+                } else {
+                    to = Some(day);
+                }
+                i += 1;
+            }
             "-p" | "--period" => {
+                period_given = true;
                 days = match value(args, i, "--period")? {
                     "today" => 1,
                     "week" => 7,
@@ -137,6 +160,7 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
                 i += 1;
             }
             "--days" => {
+                period_given = true;
                 let text = value(args, i, "--days")?;
                 days = text
                     .parse::<i64>()
@@ -154,9 +178,22 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
         }
         i += 1;
     }
+    if to.is_some() && from.is_none() {
+        return Err("--to needs --from (the first day of the range)".to_string());
+    }
+    if from.is_some() && period_given {
+        return Err("use either --from / --to or a period (-p, --days), not both".to_string());
+    }
+    if let (Some(a), Some(b)) = (from, to) {
+        if a > b {
+            return Err("--from must not be later than --to".to_string());
+        }
+    }
     Ok(Command::Export {
         format,
         days,
+        from,
+        to,
         out,
         force,
     })
@@ -236,6 +273,8 @@ mod tests {
             Ok(Command::Export {
                 format: Format::Html,
                 days: 7,
+                from: None,
+                to: None,
                 out: None,
                 force: false
             })
@@ -249,6 +288,8 @@ mod tests {
             Ok(Command::Export {
                 format: Format::Csv,
                 days: 30,
+                from: None,
+                to: None,
                 out: Some(PathBuf::from("/tmp/x.csv")),
                 force: true
             })
@@ -258,6 +299,8 @@ mod tests {
             Ok(Command::Export {
                 format: Format::Markdown,
                 days: 1,
+                from: None,
+                to: None,
                 out: None,
                 force: false
             })
@@ -275,6 +318,48 @@ mod tests {
             parse(&args("export --days 45")),
             Ok(Command::Export { days: 45, .. })
         ));
+    }
+
+    #[test]
+    fn export_accepts_a_range_of_dates() {
+        let day = |text: &str| period::parse_date(text).unwrap();
+        assert!(matches!(
+            parse(&args("export --from 2026-11-02 --to 2026-11-08")),
+            Ok(Command::Export { from, to, .. })
+                if from == Some(day("2026-11-02")) && to == Some(day("2026-11-08"))
+        ));
+        // The end defaults to today, which is only known when the report is made.
+        assert!(matches!(
+            parse(&args("export --from 2026-11-02 -f csv")),
+            Ok(Command::Export {
+                from: Some(_),
+                to: None,
+                format: Format::Csv,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bad_export_ranges_give_clear_messages() {
+        assert!(parse(&args("export --to 2026-11-08"))
+            .unwrap_err()
+            .contains("--to needs --from"));
+        assert!(parse(&args("export --from 2026-11-08 --to 2026-11-02"))
+            .unwrap_err()
+            .contains("must not be later"));
+        assert!(parse(&args("export --from 2026-11-02 --days 7"))
+            .unwrap_err()
+            .contains("not both"));
+        assert!(parse(&args("export --from 2026-11-02 -p week"))
+            .unwrap_err()
+            .contains("not both"));
+        assert!(parse(&args("export --from tomorrow"))
+            .unwrap_err()
+            .contains("needs a date like 2026-11-03, not 'tomorrow'"));
+        assert!(parse(&args("export --from"))
+            .unwrap_err()
+            .contains("needs a value"));
     }
 
     #[test]

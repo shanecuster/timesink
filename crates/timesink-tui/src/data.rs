@@ -10,7 +10,7 @@ use timesink_core::domains::{self, DomainConfig};
 use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Segment, Span};
 
-use crate::period::Range;
+use crate::period::{self, Range};
 
 /// Which period is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +25,23 @@ pub enum View {
     Year,
     /// Everything recorded, from the first day with data until today.
     All,
+    /// A calendar week, Monday to Sunday.
+    CalWeek,
+    /// A calendar quarter: Jan-Mar, Apr-Jun, Jul-Sep or Oct-Dec.
+    Quarter,
 }
 
 impl View {
     /// All views, in tab order.
-    pub const ALL: [View; 5] = [View::Today, View::Week, View::Month, View::Year, View::All];
+    pub const ALL: [View; 7] = [
+        View::Today,
+        View::Week,
+        View::Month,
+        View::Year,
+        View::All,
+        View::CalWeek,
+        View::Quarter,
+    ];
 
     /// Tab title.
     pub fn title(self) -> &'static str {
@@ -39,55 +51,83 @@ impl View {
             View::Month => "30 days",
             View::Year => "Year",
             View::All => "All time",
+            View::CalWeek => "Cal. week",
+            View::Quarter => "Quarter",
         }
     }
 
-    /// How many days (including today) the view covers, or `None` for "All time", which
-    /// depends on when recording began.
+    /// How many days (including today) a rolling view covers. `None` for the views that are
+    /// not a fixed-length window ending today: "All time" (it depends on when recording
+    /// began) and the calendar views.
     pub fn days(self) -> Option<i64> {
         match self {
             View::Today => Some(1),
             View::Week => Some(7),
             View::Month => Some(30),
             View::Year => Some(365),
-            View::All => None,
+            View::All | View::CalWeek | View::Quarter => None,
         }
     }
 
     /// Does this view show months instead of a day-by-hour grid? (Too many days to list.)
     pub fn by_month(self) -> bool {
-        matches!(self, View::Year | View::All)
+        matches!(self, View::Year | View::All | View::Quarter)
     }
 
-    /// The days this view covers when it ends today: a window of `days()` days, or for
-    /// "All time" everything from `earliest_day` (the first recorded day, if any).
-    pub fn rolling_range(self, today: i64, earliest_day: Option<i64>) -> Range {
-        match self.days() {
-            Some(n) => Range::ending(today, n),
-            None => Range::new(earliest_day.unwrap_or(today), today),
+    /// The days this view covers, `offset` periods back from the current one (0 = the
+    /// current period, -1 = the one before, ...). `earliest_day` is the first recorded day,
+    /// if any, which "All time" starts from. "All time" does not step.
+    pub fn range(self, offset: i64, today: i64, earliest_day: Option<i64>) -> Range {
+        match self {
+            View::Today | View::Week | View::Month | View::Year => {
+                let n = self.days().unwrap_or(1);
+                Range::ending(today + offset * n, n)
+            }
+            View::All => Range::new(earliest_day.unwrap_or(today), today),
+            View::CalWeek => period::calendar_week(today, offset),
+            View::Quarter => period::calendar_quarter(today, offset),
+        }
+    }
+
+    /// The offset after moving `delta` periods (-1 = back, 1 = forward) from `offset`, or
+    /// `None` when there is nowhere to go: forward past the current period, back to a
+    /// period that ends before the first recorded day, or any step in "All time".
+    pub fn step(
+        self,
+        offset: i64,
+        delta: i64,
+        today: i64,
+        earliest_day: Option<i64>,
+    ) -> Option<i64> {
+        let next = offset + delta;
+        if self == View::All || next > 0 {
+            return None;
+        }
+        let range = self.range(next, today, earliest_day);
+        match earliest_day {
+            Some(first) if range.last < first => None,
+            _ => Some(next),
+        }
+    }
+
+    /// A short description of the days a view covers (`Q4 2026`, `Nov 3-9, 2026`).
+    pub fn label(self, range: Range) -> String {
+        match self {
+            View::Quarter => period::quarter_name(range.first),
+            _ => period::label(range),
         }
     }
 
     /// The next tab, wrapping round.
     pub fn next(self) -> View {
-        match self {
-            View::Today => View::Week,
-            View::Week => View::Month,
-            View::Month => View::Year,
-            View::Year => View::All,
-            View::All => View::Today,
-        }
+        let i = View::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        View::ALL[(i + 1) % View::ALL.len()]
     }
 
     /// The previous tab, wrapping round.
     pub fn prev(self) -> View {
-        match self {
-            View::Today => View::All,
-            View::Week => View::Today,
-            View::Month => View::Week,
-            View::Year => View::Month,
-            View::All => View::Year,
-        }
+        let i = View::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()]
     }
 }
 
@@ -231,6 +271,11 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Does the period include today, so "now" markers and today's chart make sense?
+    pub fn is_live(&self) -> bool {
+        self.range.last == self.today
+    }
+
     /// Fill in the website time for this snapshot's period (a no-op when the extension has
     /// recorded nothing). Kept apart from `load` so the app maps stay the only thing that
     /// function needs.
@@ -305,7 +350,7 @@ impl Snapshot {
             db,
             map,
             view,
-            view.rolling_range(today, earliest),
+            view.range(0, today, earliest),
             device,
             now,
             tz,
@@ -324,7 +369,11 @@ impl Snapshot {
         tz: &dyn Fn(i64) -> i64,
     ) -> Snapshot {
         let today = stats::local_day(now, tz);
-        let range = Range::ending(today, view.days().unwrap_or(365));
+        let range = match view {
+            // The calendar views are their own stretch of days, not "N days ending today".
+            View::CalWeek | View::Quarter => view.range(0, today, None),
+            _ => Range::ending(today, view.days().unwrap_or(365)),
+        };
         Snapshot::build_days(spans, listening, map, view, range, now, tz)
     }
 
@@ -561,8 +610,9 @@ mod tests {
         assert_eq!(View::Today.next(), View::Week);
         assert_eq!(View::Month.next(), View::Year);
         assert_eq!(View::Year.next(), View::All);
-        assert_eq!(View::All.next(), View::Today);
-        assert_eq!(View::Today.prev(), View::All);
+        assert_eq!(View::All.next(), View::CalWeek);
+        assert_eq!(View::Quarter.next(), View::Today);
+        assert_eq!(View::Today.prev(), View::Quarter);
         // Going round the whole circle both ways comes back to the start.
         let mut v = View::Today;
         for _ in View::ALL {
@@ -600,26 +650,104 @@ mod tests {
         assert_eq!(past.today, 100);
         // The rolling windows end today; "All time" starts at the first recorded day.
         assert_eq!(
-            View::Month.rolling_range(100, None),
+            View::Month.range(0, 100, None),
             Range {
                 first: 71,
                 last: 100
             }
         );
         assert_eq!(
-            View::All.rolling_range(100, Some(40)),
+            View::All.range(0, 100, Some(40)),
             Range {
                 first: 40,
                 last: 100
             }
         );
         assert_eq!(
-            View::All.rolling_range(100, None),
+            View::All.range(0, 100, None),
             Range {
                 first: 100,
                 last: 100
             }
         );
+    }
+
+    #[test]
+    fn tabs_cycle_through_every_view_and_back() {
+        let mut v = View::Today;
+        let mut seen = Vec::new();
+        for _ in 0..View::ALL.len() {
+            seen.push(v);
+            v = v.next();
+        }
+        assert_eq!(seen, View::ALL.to_vec());
+        assert_eq!(v, View::Today, "the cycle wraps to the start");
+        assert_eq!(View::Today.prev(), View::Quarter);
+        for view in View::ALL {
+            assert_eq!(view.next().prev(), view);
+        }
+    }
+
+    #[test]
+    fn views_step_back_a_period_at_a_time() {
+        // Rolling windows move by their own length: the 7 days before the last 7.
+        assert_eq!(
+            View::Week.range(-1, 100, None),
+            Range {
+                first: 87,
+                last: 93
+            }
+        );
+        assert_eq!(
+            View::Today.range(-1, 100, None),
+            Range {
+                first: 99,
+                last: 99
+            }
+        );
+        // Day 100 is a Saturday (1970-01-01 was a Thursday), so this calendar week is Mon 95 to today.
+        assert_eq!(
+            View::CalWeek.range(0, 100, None),
+            Range {
+                first: 95,
+                last: 100
+            }
+        );
+        assert_eq!(
+            View::CalWeek.range(-1, 100, None),
+            Range {
+                first: 88,
+                last: 94
+            }
+        );
+        // Stepping goes back, never forward past the current period, and never into
+        // periods that ended before the first recorded day.
+        assert_eq!(View::Week.step(0, -1, 100, Some(50)), Some(-1));
+        assert_eq!(View::Week.step(-1, 1, 100, Some(50)), Some(0));
+        assert_eq!(View::Week.step(0, 1, 100, Some(50)), None);
+        assert_eq!(View::Week.step(-6, -1, 100, Some(60)), None);
+        assert_eq!(View::Week.step(-1, -1, 100, None), Some(-2));
+        // "All time" is one fixed period.
+        assert_eq!(View::All.step(0, -1, 100, Some(50)), None);
+    }
+
+    #[test]
+    fn the_quarter_view_sums_by_month_and_is_named_by_quarter() {
+        assert!(View::Quarter.by_month());
+        assert!(!View::CalWeek.by_month());
+        let today = period::day_of(chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap());
+        let range = View::Quarter.range(0, today, None);
+        assert_eq!(View::Quarter.label(range), "Q4 2026");
+        assert_eq!(
+            View::CalWeek.label(View::CalWeek.range(0, today, None)),
+            "Nov 9-11, 2026"
+        );
+        // A past quarter reads as a whole quarter, and its snapshot lists those days only.
+        let past = View::Quarter.range(-1, today, None);
+        let snap = Snapshot::build_days(&[], &[], &map(), View::Quarter, past, 0, &utc);
+        assert_eq!(snap.days.len() as i64, past.len());
+        assert_eq!(past.len(), 92);
+        assert!(!snap.is_live());
     }
 
     #[test]

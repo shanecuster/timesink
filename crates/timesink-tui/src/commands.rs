@@ -14,6 +14,7 @@ use timesink_core::stats;
 
 use crate::data;
 use crate::export::{format_time, Format, ReportData};
+use crate::period::Range;
 
 /// Short word for a period in file names: `today`, `week`, `month`, `year`, `all`, `45days`.
 /// (0 days is the request for everything recorded.)
@@ -115,23 +116,22 @@ pub fn write_file(path: &Path, text: &str, replace: bool) -> Result<()> {
 pub fn collect(
     db: &Db,
     map: &AppMap,
-    days: i64,
+    range: Range,
     now: i64,
     tz: &dyn Fn(i64) -> i64,
 ) -> Result<ReportData> {
-    let today = stats::local_day(now, tz);
-    let from = stats::day_start_utc(today - (days.max(1) - 1), tz);
-    let intervals = db.intervals_between(from, now + 1, None)?;
-    let listening = db.listening_between(from, now + 1, None)?;
-    let report = ReportData::build(&intervals, &listening, map, days, now, tz);
+    let (from, to) = range.bounds(now, tz);
+    let intervals = db.intervals_between(from, to, None)?;
+    let listening = db.listening_between(from, to, None)?;
+    let report = ReportData::build_range(&intervals, &listening, map, range, now, tz);
     // Website time, only when the browser extension has recorded some.
-    let sites = db.domains_between(from, now + 1, None)?;
+    let sites = db.domains_between(from, to, None)?;
     if sites.is_empty() {
         return Ok(report);
     }
     let config = paths::load_domain_config().unwrap_or_default();
     let spans = data::site_spans(&sites, &intervals, &config);
-    Ok(report.with_sites(&spans, &config, days, now, tz))
+    Ok(report.with_sites(&spans, &config, range, now, tz))
 }
 
 /// Local date of `now` as `YYYY-MM-DD`, for file names.
@@ -139,12 +139,21 @@ fn local_date(now: i64, tz: &dyn Fn(i64) -> i64) -> String {
     format_time(now, tz).chars().take(10).collect()
 }
 
+/// Which days an export covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportSpan {
+    /// The last N days, ending today; 0 means everything recorded so far.
+    Last(i64),
+    /// These exact days (a past week, a quarter, a custom range).
+    Between(Range),
+}
+
 /// What to export and where to put it.
 pub struct ExportRequest<'a> {
     /// File format.
     pub format: Format,
-    /// Number of days, ending today; 0 means everything recorded so far.
-    pub days: i64,
+    /// The days to cover.
+    pub span: ExportSpan,
     /// Where to write; the default folder is used when absent.
     pub out: Option<&'a Path>,
     /// Replace an existing file.
@@ -159,21 +168,23 @@ pub fn run_export(
     now: i64,
     tz: &dyn Fn(i64) -> i64,
 ) -> Result<PathBuf> {
-    // "All" starts on the day of the first recorded interval.
-    let days = if request.days == 0 {
-        match db.earliest_start()? {
-            Some(t) => (stats::local_day(now, tz) - stats::local_day(t, tz) + 1).max(1),
-            None => 1,
-        }
-    } else {
-        request.days
+    let today = stats::local_day(now, tz);
+    let range = match request.span {
+        // "All" starts on the day of the first recorded interval.
+        ExportSpan::Last(0) => match db.earliest_start()? {
+            Some(t) => Range::new(stats::local_day(t, tz), today),
+            None => Range::new(today, today),
+        },
+        ExportSpan::Last(n) => Range::ending(today, n),
+        // Never past today: there is nothing to report for days that have not happened.
+        ExportSpan::Between(r) => Range::new(r.first.min(today), r.last.min(today)),
     };
-    let data = collect(db, map, days, now, tz)?;
-    let stem = format!(
-        "timesink-{}-{}",
-        period_slug(request.days),
-        local_date(now, tz)
-    );
+    let data = collect(db, map, range, now, tz)?;
+    let stem = match request.span {
+        ExportSpan::Last(days) => format!("timesink-{}-{}", period_slug(days), local_date(now, tz)),
+        // A name made of the dates, so a report for a past period is easy to tell apart.
+        ExportSpan::Between(_) => format!("timesink-{}-to-{}", data.first_date, data.last_date),
+    };
     let path = resolve_output(
         request.out,
         &default_dir()?,
@@ -437,7 +448,7 @@ mod tests {
         let out = dir.join("exports");
         let request = ExportRequest {
             format: Format::Csv,
-            days: 7,
+            span: ExportSpan::Last(7),
             out: Some(&out),
             force: false,
         };
@@ -446,6 +457,25 @@ mod tests {
         let text = std::fs::read_to_string(&csv).unwrap();
         assert!(text.contains("listening"));
         assert!(text.contains("cider"));
+
+        // An export of exact days is named by them and holds only those days.
+        let between = ExportRequest {
+            format: Format::Csv,
+            span: ExportSpan::Between(Range::new(98, 99)),
+            out: Some(&out),
+            force: false,
+        };
+        let past = run_export(&db, &map, &between, now, &minus5).unwrap();
+        assert_eq!(past, out.join("timesink-1970-04-09-to-1970-04-10.csv"));
+        // Days after today are cut off rather than reported empty.
+        let future = ExportRequest {
+            span: ExportSpan::Between(Range::new(99, 500)),
+            ..between
+        };
+        let cut = run_export(&db, &map, &future, now, &minus5).unwrap();
+        assert!(cut
+            .to_string_lossy()
+            .ends_with("1970-04-10-to-1970-04-11.csv"));
 
         // A second export the same day gets a new name, never overwriting.
         let again = run_export(&db, &map, &request, now, &minus5).unwrap();

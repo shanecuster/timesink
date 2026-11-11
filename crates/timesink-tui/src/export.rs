@@ -155,9 +155,13 @@ pub struct ReportData {
     pub sites: Vec<SiteLine>,
 }
 
-/// Name for a period of `days` days.
-pub fn period_label(days: i64) -> String {
-    match days {
+/// Name for a period: `today` or `last N days` when it ends today, otherwise its dates
+/// (`2026-11-02 to 2026-11-08`).
+pub fn period_label(range: Range, today: i64) -> String {
+    if range.last != today {
+        return format!("{} to {}", format_day(range.first), format_day(range.last));
+    }
+    match range.len() {
         1 => "today".to_string(),
         n => format!("last {n} days"),
     }
@@ -186,6 +190,7 @@ fn format_day(day: i64) -> String {
 impl ReportData {
     /// Work out a report for the last `days` days (including today) from the
     /// stored rows. Pure: rows and the time go in, a report comes out.
+    #[cfg(test)]
     pub fn build(
         intervals: &[StoredInterval],
         listening: &[(String, i64, i64)],
@@ -194,9 +199,24 @@ impl ReportData {
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> ReportData {
-        let days = days.max(1);
+        let range = Range::ending(stats::local_day(now, tz), days);
+        ReportData::build_range(intervals, listening, map, range, now, tz)
+    }
+
+    /// Like `build`, for any run of days (a past week, a quarter, a custom range).
+    pub fn build_range(
+        intervals: &[StoredInterval],
+        listening: &[(String, i64, i64)],
+        map: &AppMap,
+        range: Range,
+        now: i64,
+        tz: &dyn Fn(i64) -> i64,
+    ) -> ReportData {
         let today = stats::local_day(now, tz);
-        let from = stats::day_start_utc(today - (days - 1), tz);
+        // Read the period from the start of its first day; rows are cut off at its end (or
+        // at `now`, for a period that includes today).
+        let (from, to) = range.bounds(now, tz);
+        let to = to.min(now);
 
         // Spans for the totals (the maths clips them to the period).
         let spans: Vec<Span> = intervals
@@ -215,13 +235,12 @@ impl ReportData {
                 key: player.clone(),
             })
             .collect();
-        let range = Range::ending(today, days);
         let snap = Snapshot::build_days(&spans, &listen_spans, map, View::Month, range, now, tz);
 
         // Raw rows, clipped to the period, with their start time for sorting.
         let mut rows: Vec<(i64, RawRow)> = Vec::new();
         for i in intervals {
-            let (start, end) = (i.start_ts.max(from), i.end_ts.min(now));
+            let (start, end) = (i.start_ts.max(from), i.end_ts.min(to));
             if end <= start {
                 continue;
             }
@@ -241,7 +260,7 @@ impl ReportData {
             ));
         }
         for (player, s, e) in listening {
-            let (start, end) = (*s.max(&from), *e.min(&now));
+            let (start, end) = (*s.max(&from), *e.min(&to));
             if end <= start {
                 continue;
             }
@@ -263,7 +282,7 @@ impl ReportData {
 
         ReportData {
             generated: format_time(now, tz),
-            label: period_label(days),
+            label: period_label(range, today),
             first_date: snap
                 .days
                 .first()
@@ -308,13 +327,13 @@ impl ReportData {
         mut self,
         spans: &[Span],
         config: &DomainConfig,
-        days: i64,
+        range: Range,
         now: i64,
         tz: &dyn Fn(i64) -> i64,
     ) -> ReportData {
-        let today = stats::local_day(now, tz);
-        let from = stats::day_start_utc(today - (days.max(1) - 1), tz);
-        self.sites = data::site_totals(spans, config, from, now)
+        let (from, to) = range.bounds(now, tz);
+        let to = to.min(now);
+        self.sites = data::site_totals(spans, config, from, to)
             .into_iter()
             .map(|t| SiteLine {
                 site: t.site,
@@ -324,7 +343,7 @@ impl ReportData {
             })
             .collect();
         for s in spans {
-            let (start, end) = (s.start.max(from), s.end.min(now));
+            let (start, end) = (s.start.max(from), s.end.min(to));
             if end <= start {
                 continue;
             }
@@ -736,6 +755,41 @@ mod tests {
     }
 
     #[test]
+    fn a_past_range_reports_only_its_own_days() {
+        let start = |day: i64| stats::day_start_utc(day, &minus5);
+        let rows = [
+            // Before the range, inside it, running over its end, and after it.
+            interval(start(89) + 3600, start(89) + 7200, "zen", ""),
+            interval(start(91) + 3600, start(91) + 7200, "zen", ""),
+            interval(start(92) + 20 * 3600, start(93) + 3600, "wezterm", ""),
+            interval(start(95) + 3600, start(95) + 7200, "zen", ""),
+        ];
+        let music = [("cider".to_string(), start(93) + 100, start(93) + 900)];
+        let r = ReportData::build_range(&rows, &music, &map(), Range::new(90, 92), NOW, &minus5);
+        assert_eq!(r.label, "1970-04-01 to 1970-04-03");
+        assert_eq!(
+            (r.first_date.as_str(), r.last_date.as_str()),
+            ("1970-04-01", "1970-04-03")
+        );
+        assert_eq!(r.days.len(), 3);
+        // 1 hour inside, plus the part of the late row that falls on the 92nd day (4 hours).
+        assert_eq!(r.total, 3600 + 4 * 3600);
+        assert_eq!(r.rows.len(), 2);
+        // Listening that fell after the range is left out too.
+        assert_eq!(r.listening_total, 0);
+    }
+
+    #[test]
+    fn labels_say_today_or_last_n_days_only_for_periods_ending_today() {
+        assert_eq!(period_label(Range::ending(100, 1), 100), "today");
+        assert_eq!(period_label(Range::ending(100, 30), 100), "last 30 days");
+        assert_eq!(
+            period_label(Range::new(94, 99), 100),
+            "1970-04-05 to 1970-04-10"
+        );
+    }
+
+    #[test]
     fn rows_are_clipped_to_the_period() {
         // A row that started 10 days ago and ends an hour ago: only the part
         // inside "today" is exported for a 1-day report.
@@ -870,7 +924,13 @@ mod tests {
                 key: "<b>x</b>.example".into(),
             },
         ];
-        sample().with_sites(&spans, &config, 7, NOW, &minus5)
+        sample().with_sites(
+            &spans,
+            &config,
+            Range::ending(stats::local_day(NOW, &minus5), 7),
+            NOW,
+            &minus5,
+        )
     }
 
     #[test]
