@@ -274,7 +274,7 @@ pub fn run_demo(days: i64, seed: u64, now: i64, tz: &dyn Fn(i64) -> i64) -> Resu
 /// `timesink sync`: upload this computer's changed days and download the others'.
 /// With `status_only` nothing is sent; the setup and what is waiting are described.
 pub fn run_sync(db: &Db, status_only: bool) -> Result<String> {
-    use crate::sync::{self, HttpRemote, SyncConfig};
+    use timesink_sync::{self as sync, HttpRemote, SyncConfig};
     let path = paths::sync_conf_path()?;
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(

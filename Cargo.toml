@@ -3,6 +3,7 @@
 # The project is split into crates so the pieces can be reused later:
 #   - timesink-core:   data model, title parsing, privacy rules, tracker, SQLite storage.
 #                      No Hyprland or UI code, so the TUI and sync can share it.
+#   - timesink-sync:   CouchDB sync (no terminal code), shared with the Android app.
 #   - timesink-daemon: the background collector that talks to Hyprland.
 #   - timesink-tui:    the terminal interface (charts and summaries).
 [workspace]
@@ -10,6 +11,7 @@ resolver = "2"
 members = [
     "crates/timesink-core",
     "crates/timesink-daemon",
+    "crates/timesink-sync",
     "crates/timesink-tui",
     "crates/timesink-zen",
 ]

@@ -7,7 +7,6 @@ mod commands;
 mod dates;
 mod export;
 mod palette;
-mod sync;
 mod ui;
 
 use std::cell::Cell;

@@ -2261,17 +2261,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "timesink-tui"
+name = "timesink-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "serde_json",
+ "timesink-core",
+ "ureq",
+]
+
+[[package]]
+name = "timesink-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "chrono",
  "crossterm",
  "ratatui",
  "serde_json",
  "timesink-core",
- "ureq",
+ "timesink-sync",
 ]
 
 [[package]]
