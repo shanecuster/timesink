@@ -4,3 +4,6 @@
 *.bak*
 web-ext-artifacts/
 node_modules/
+
+# Local signing state left by contrib/sign-extension.sh
+extension/.amo-upload-uuid
