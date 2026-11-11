@@ -4,7 +4,6 @@ mod assign;
 mod banner;
 mod cli;
 mod commands;
-mod data;
 mod dates;
 mod export;
 mod palette;
@@ -24,9 +23,9 @@ use timesink_core::paths;
 use timesink_core::settings::Settings;
 use timesink_core::theme;
 
-use crate::data::{Snapshot, View};
 use crate::export::Format;
 use crate::ui::{App, Scroll, SortMode};
+use timesink_core::data::{Snapshot, View};
 
 /// How often the screen refreshes by itself.
 const REFRESH: Duration = Duration::from_secs(5);

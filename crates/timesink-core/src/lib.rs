@@ -8,6 +8,7 @@
 
 pub mod appmap;
 pub mod config;
+pub mod data;
 pub mod db;
 pub mod demo;
 pub mod domains;

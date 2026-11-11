@@ -15,8 +15,8 @@ use timesink_core::theme::{Rgb, Theme};
 
 use crate::assign::{self, Assign};
 use crate::banner;
-use crate::data::{DayRow, Snapshot, View};
 use crate::dates::DatePrompt;
+use timesink_core::data::{DayRow, Snapshot, View};
 
 /// Everything the screen needs.
 pub struct App {
@@ -1116,10 +1116,10 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{Snapshot, View};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use timesink_core::appmap::AppMap;
+    use timesink_core::data::{Snapshot, View};
     use timesink_core::period::Range;
     use timesink_core::stats::Span as TimeSpan;
 
@@ -1685,13 +1685,13 @@ mod tests {
         let mut app = sample_app(View::Today);
         assert!(!render(&app, 120, 40).contains("Sites"));
         app.snapshot.sites = vec![
-            crate::data::SiteTotal {
+            timesink_core::data::SiteTotal {
                 site: "github.com".into(),
                 display: "github".into(),
                 category: "Research".into(),
                 secs: 5400,
             },
-            crate::data::SiteTotal {
+            timesink_core::data::SiteTotal {
                 site: "bbc.co.uk".into(),
                 display: "bbc.co.uk".into(),
                 category: "Other".into(),

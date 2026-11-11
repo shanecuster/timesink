@@ -16,9 +16,9 @@ use timesink_core::domains::DomainConfig;
 use timesink_core::model::StoredInterval;
 use timesink_core::stats::{self, Span};
 
-use crate::data::{self, Snapshot, View};
 use crate::palette;
 use crate::ui::fmt_duration;
+use timesink_core::data::{self, Snapshot, View};
 use timesink_core::period::Range;
 
 /// The output formats.

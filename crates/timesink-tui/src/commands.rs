@@ -12,8 +12,8 @@ use timesink_core::model::WindowSnapshot;
 use timesink_core::paths;
 use timesink_core::stats;
 
-use crate::data;
 use crate::export::{format_time, Format, ReportData};
+use timesink_core::data;
 use timesink_core::period::Range;
 
 /// Short word for a period in file names: `today`, `week`, `month`, `year`, `all`, `45days`.

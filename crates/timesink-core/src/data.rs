@@ -3,14 +3,14 @@
 //! `Snapshot::build` is a pure function: rows in, numbers out. The database is
 //! only touched by `Snapshot::load`, so the maths can be tested on its own.
 
+use crate::appmap::{AppMap, AppTotal};
+use crate::db::Db;
+use crate::domains::{self, DomainConfig};
+use crate::model::StoredInterval;
+use crate::stats::{self, Segment, Span};
 use anyhow::Result;
-use timesink_core::appmap::{AppMap, AppTotal};
-use timesink_core::db::Db;
-use timesink_core::domains::{self, DomainConfig};
-use timesink_core::model::StoredInterval;
-use timesink_core::stats::{self, Segment, Span};
 
-use timesink_core::period::{self, Range};
+use crate::period::{self, Range};
 
 /// Which period is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,9 +381,9 @@ impl Snapshot {
         )
     }
 
-    /// Work out every number from the spans for the period of `view`.
-    /// No database or clock involved.
-    #[cfg(test)]
+    /// Work out every number from the spans for the current period of `view` (the one that
+    /// ends today). No database or clock is involved, so the screens' tests and other
+    /// programs can build a snapshot from plain spans.
     pub fn build(
         spans: &[Span],
         listening: &[Span],
@@ -867,7 +867,7 @@ mod tests {
         let start = now - 10 * 86400;
         db.insert_open(
             start,
-            &timesink_core::model::WindowSnapshot {
+            &crate::model::WindowSnapshot {
                 app_class: "zen".into(),
                 title: String::new(),
                 workspace: "1".into(),
