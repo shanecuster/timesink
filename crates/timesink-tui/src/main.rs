@@ -76,7 +76,8 @@ fn start() -> Result<()> {
         );
     }
     let db = Db::open(&path, &paths::device_id())?;
-    let map = paths::load_app_map()?;
+    // Your own apps.conf plus the names and categories other computers have shared.
+    let map = paths::load_app_map_with(&db)?;
 
     match command {
         cli::Command::Export {
@@ -188,6 +189,11 @@ fn run(
                     sync_rx = None;
                     app.syncing = false;
                     app.notice = Some(format!(" {message}"));
+                    // Another computer may have shared new names and categories.
+                    if let Ok(fresh) = paths::load_app_map_with(db) {
+                        *map = fresh;
+                        app.category_names = map.categories();
+                    }
                     let view = app.snapshot.view;
                     reload(app, db, map, view);
                     last_refresh = Instant::now();
@@ -240,7 +246,7 @@ fn run(
                     if let Some(write) =
                         assign::handle_key(&mut app.assign, key, &app.category_names)
                     {
-                        app.notice = Some(apply_assignment(app, map, &write));
+                        app.notice = Some(apply_assignment(app, db, map, &write));
                         reload(app, db, map, view);
                         last_refresh = Instant::now();
                     }
@@ -427,12 +433,12 @@ fn run(
 
 /// Save an edit from the app editor to `apps.conf`, re-read the file and describe what
 /// happened. One line is appended for each raw class the row stands for.
-fn apply_assignment(app: &mut App, map: &mut AppMap, write: &assign::Write) -> String {
+fn apply_assignment(app: &mut App, db: &Db, map: &mut AppMap, write: &assign::Write) -> String {
     let result = paths::apps_conf_path().and_then(|path| {
         for raw in &write.raws {
             appmap::append_entry(&path, raw, &write.display, &write.category)?;
         }
-        paths::load_app_map()
+        paths::load_app_map_with(db)
     });
     match result {
         Ok(new_map) => {
@@ -483,7 +489,7 @@ fn export_view(db: &Db, map: &AppMap, format: Format, app: &App) -> String {
 /// Add website time to the current snapshot. A problem here is not worth interrupting the
 /// screen for: the Sites panel just stays empty.
 fn attach_sites(app: &mut App, db: &Db) {
-    let config = paths::load_domain_config().unwrap_or_default();
+    let config = paths::load_domain_config_with(db).unwrap_or_default();
     app.site_categories = config.sites.categories();
     if let Err(e) =
         app.snapshot

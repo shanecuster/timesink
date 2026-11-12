@@ -77,6 +77,67 @@ pub fn load_app_map() -> Result<AppMap> {
         .with_browser_defaults())
 }
 
+/// A config file's text and when it last changed (Unix seconds); empty text and 0 when the
+/// file does not exist.
+fn read_with_mtime(name: &str) -> Result<(String, i64)> {
+    let path = config_dir()?.join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let changed = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            Ok((text, changed))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), 0)),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// This computer's own lists (`apps.conf` and the site lines of `domains.conf`) with the
+/// times they last changed, ready to be shared through sync.
+pub fn own_conf_lists() -> Result<crate::syncdoc::ConfLists> {
+    let (apps, apps_updated) = read_with_mtime("apps.conf")?;
+    let (domains, domains_updated) = read_with_mtime("domains.conf")?;
+    Ok(crate::syncdoc::ConfLists {
+        apps,
+        apps_updated,
+        domains: crate::domains::DomainConfig::site_lines(&domains),
+        domains_updated,
+    })
+}
+
+/// Like [`load_app_map`], but also uses the names and categories other computers have
+/// shared through sync (kept in the database). Your own file comes first; for the same app
+/// whichever list changed most recently wins.
+pub fn load_app_map_with(db: &crate::db::Db) -> Result<AppMap> {
+    let own = own_conf_lists()?;
+    let remote = db.remote_confs()?;
+    let mut layers: Vec<(&str, i64)> = vec![(own.apps.as_str(), own.apps_updated)];
+    layers.extend(
+        remote
+            .iter()
+            .map(|(_, l)| (l.apps.as_str(), l.apps_updated)),
+    );
+    Ok(AppMap::from_layers(&layers).with_browser_defaults())
+}
+
+/// Like [`load_domain_config`], but with site names and categories shared by other
+/// computers merged in. The browser and block settings are always only your own.
+pub fn load_domain_config_with(db: &crate::db::Db) -> Result<crate::domains::DomainConfig> {
+    let own = own_conf_lists()?;
+    let config = load_domain_config()?;
+    let remote = db.remote_confs()?;
+    let mut layers: Vec<(&str, i64)> = vec![(own.domains.as_str(), own.domains_updated)];
+    layers.extend(
+        remote
+            .iter()
+            .map(|(_, l)| (l.domains.as_str(), l.domains_updated)),
+    );
+    Ok(config.with_site_layers(&layers))
+}
+
 /// Where the interface remembers its choices: `tui.conf` in the config folder.
 pub fn tui_settings_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("tui.conf"))

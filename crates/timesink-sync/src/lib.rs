@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use timesink_core::db::Db;
-use timesink_core::syncdoc::{self, DayRows};
+use timesink_core::syncdoc::{self, ConfLists, DayRows};
 
 /// Where to find the CouchDB server and how to log in (from `sync.conf`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +134,10 @@ pub trait Remote {
     fn current_rev(&mut self, id: &str) -> Result<Option<String>>;
     /// Changes after `since`, at most `limit`; returns them with the new position.
     fn changes(&mut self, since: &str, limit: usize) -> Result<(Vec<Change>, String)>;
+    /// Every shared-lists document (`conf:<device>`) currently on the server. These are
+    /// few and small, so they are read whole on each sync instead of through the changes
+    /// feed (which a computer may already have read past before it knew about them).
+    fn conf_docs(&mut self) -> Result<Vec<Value>>;
 }
 
 /// What a sync run did.
@@ -147,6 +151,10 @@ pub struct Report {
     pub downloaded: usize,
     /// Things that were skipped or went wrong, in words.
     pub warnings: Vec<String>,
+    /// Whether this computer's shared lists (names and categories) were uploaded.
+    pub lists_uploaded: bool,
+    /// How many other computers' lists were downloaded and changed.
+    pub lists_downloaded: usize,
 }
 
 /// How many changes are fetched per request.
@@ -154,11 +162,88 @@ const BATCH: usize = 100;
 
 /// Upload this computer's changed days, then download everyone else's.
 pub fn run(db: &Db, remote: &mut dyn Remote) -> Result<Report> {
+    run_with_lists(db, remote, None)
+}
+
+/// Like [`run`], and also shares the names and categories: `own` is this computer's lists
+/// (uploaded when they changed since the last upload), and every other computer's lists are
+/// downloaded into the database for `paths::load_app_map_with` to merge. Days always come
+/// first: a problem with the lists is reported as a warning and never stops the days.
+pub fn run_with_lists(db: &Db, remote: &mut dyn Remote, own: Option<&ConfLists>) -> Result<Report> {
     let mut report = Report::default();
     remote.ensure_db()?;
     upload(db, remote, &mut report)?;
     download(db, remote, &mut report)?;
+    if let Err(e) = sync_lists(db, remote, own, &mut report) {
+        report.warnings.push(format!("names and categories: {e:#}"));
+    }
     Ok(report)
+}
+
+/// Share the lists: upload ours if they changed, then keep a copy of everyone else's.
+fn sync_lists(
+    db: &Db,
+    remote: &mut dyn Remote,
+    own: Option<&ConfLists>,
+    report: &mut Report,
+) -> Result<()> {
+    let device = db.device_id().to_string();
+    let id = syncdoc::conf_doc_id(&device);
+    if let Some(lists) = own {
+        let last = db.own_conf_uploaded()?;
+        // Nothing to say yet, or nothing new since the last upload: send nothing.
+        let nothing_new = last.as_ref() == Some(lists)
+            || (last.is_none() && lists.apps.trim().is_empty() && lists.domains.trim().is_empty());
+        if !nothing_new {
+            let rev = db.doc_rev(&id)?;
+            let mut result = remote
+                .put_docs(&[syncdoc::build_conf_doc(&device, lists, rev.as_deref())])?
+                .remove(0);
+            // A conflict means the server holds a newer revision than we remember.
+            if result == PutResult::Conflict {
+                let rev = remote.current_rev(&id)?;
+                result = remote
+                    .put_docs(&[syncdoc::build_conf_doc(&device, lists, rev.as_deref())])?
+                    .remove(0);
+            }
+            match result {
+                PutResult::Ok(rev) => {
+                    db.set_doc_rev(&id, Some(&rev))?;
+                    db.set_own_conf_uploaded(lists)?;
+                    report.lists_uploaded = true;
+                }
+                PutResult::Conflict => report
+                    .warnings
+                    .push("names and categories: still in conflict, will retry".into()),
+                PutResult::Failed(why) => {
+                    report.warnings.push(format!("names and categories: {why}"))
+                }
+            }
+        }
+    }
+    // Download everyone else's, and learn our own document's revision.
+    for doc in remote.conf_docs()? {
+        let Ok((other, lists)) = syncdoc::parse_conf_doc(&doc) else {
+            continue;
+        };
+        if other == device {
+            if let Some(rev) = doc["_rev"].as_str() {
+                db.set_doc_rev(&id, Some(rev))?;
+            }
+            continue;
+        }
+        // Only count (and rewrite) a list that actually changed.
+        let known = db
+            .remote_confs()?
+            .into_iter()
+            .find(|(d, _)| *d == other)
+            .map(|(_, l)| l);
+        if known.as_ref() != Some(&lists) {
+            db.set_remote_conf(&other, Some(&lists))?;
+            report.lists_downloaded += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Upload every day marked as changed since the last upload.
@@ -442,6 +527,28 @@ impl Remote for HttpRemote {
         }
     }
 
+    fn conf_docs(&mut self) -> Result<Vec<Value>> {
+        // Every id from "conf:" up to "conf:" followed by the highest character.
+        let query = format!(
+            "/_all_docs?include_docs=true&startkey={}&endkey={}",
+            pct_encode("\"conf:\""),
+            pct_encode("\"conf:\u{fff0}\"")
+        );
+        let resp: Value = self
+            .agent
+            .get(&self.url(&query))
+            .set("Authorization", &self.auth)
+            .call()
+            .map_err(Self::describe)?
+            .into_json()
+            .context("reading the lists")?;
+        let rows = resp["rows"].as_array().context("unexpected lists answer")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.get("doc").filter(|d| !d.is_null()).cloned())
+            .collect())
+    }
+
     fn changes(&mut self, since: &str, limit: usize) -> Result<(Vec<Change>, String)> {
         let resp: Value = self
             .agent
@@ -554,6 +661,20 @@ mod tests {
                 .get(id)
                 .filter(|(_, _, _, deleted)| !deleted)
                 .map(|(_, rev, _, _)| rev.clone()))
+        }
+        fn conf_docs(&mut self) -> Result<Vec<Value>> {
+            let mut docs: Vec<Value> = self
+                .docs
+                .iter()
+                .filter(|(id, (_, _, _, deleted))| id.starts_with("conf:") && !deleted)
+                .map(|(_, (_, rev, doc, _))| {
+                    let mut doc = doc.clone();
+                    doc["_rev"] = json!(rev);
+                    doc
+                })
+                .collect();
+            docs.sort_by_key(|d| d["_id"].as_str().unwrap_or("").to_string());
+            Ok(docs)
         }
         fn changes(&mut self, since: &str, limit: usize) -> Result<(Vec<Change>, String)> {
             let since: u64 = since.parse().unwrap_or(0);
@@ -1001,5 +1122,58 @@ mod tests {
         }
         // The upload sent the documents as JSON.
         assert!(seen[1].contains(r#""docs""#));
+    }
+
+    /// Build lists for the tests.
+    fn lists(apps: &str, apps_updated: i64) -> ConfLists {
+        ConfLists {
+            apps: apps.into(),
+            apps_updated,
+            domains: "github.com github Research\n".into(),
+            domains_updated: apps_updated,
+        }
+    }
+
+    #[test]
+    fn lists_are_uploaded_once_and_shared_between_computers() {
+        let desktop = Db::open_in_memory("mangrove").unwrap();
+        let phone = Db::open_in_memory("pixel").unwrap();
+        let mut remote = MemRemote::default();
+        let mine = lists("zen zen Browser\n", 100);
+
+        let r = run_with_lists(&desktop, &mut remote, Some(&mine)).unwrap();
+        assert!(r.lists_uploaded);
+        assert!(remote.docs.contains_key("conf:mangrove"));
+        // Unchanged lists are not sent again.
+        let calls = remote.put_calls;
+        let r = run_with_lists(&desktop, &mut remote, Some(&mine)).unwrap();
+        assert!(!r.lists_uploaded);
+        assert_eq!(remote.put_calls, calls);
+        // A change is sent.
+        let r = run_with_lists(&desktop, &mut remote, Some(&lists("zen zen Web\n", 200))).unwrap();
+        assert!(r.lists_uploaded);
+
+        // The phone gets the desktop's lists, even though it has never synced before.
+        let r = run_with_lists(&phone, &mut remote, Some(&lists("", 0))).unwrap();
+        assert_eq!(r.lists_downloaded, 1);
+        let got = phone.remote_confs().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "mangrove");
+        assert_eq!(got[0].1.apps, "zen zen Web\n");
+        // A second sync downloads nothing new, and the phone never stores its own lists back.
+        let r = run_with_lists(&phone, &mut remote, Some(&lists("", 0))).unwrap();
+        assert_eq!(r.lists_downloaded, 0);
+        assert_eq!(phone.remote_confs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_computer_with_no_lists_uploads_nothing_and_old_calls_still_work() {
+        let db = Db::open_in_memory("mangrove").unwrap();
+        let mut remote = MemRemote::default();
+        run(&db, &mut remote).unwrap();
+        let empty = ConfLists::default();
+        let r = run_with_lists(&db, &mut remote, Some(&empty)).unwrap();
+        assert!(!r.lists_uploaded);
+        assert!(!remote.docs.contains_key("conf:mangrove"));
     }
 }

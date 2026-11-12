@@ -143,6 +143,30 @@ impl DomainConfig {
         config
     }
 
+    /// Only the site lines of a `domains.conf` (the `browser =` and `block =` settings
+    /// removed). This is the part that is shared between computers; the settings stay
+    /// on the computer they were written for.
+    pub fn site_lines(text: &str) -> String {
+        let mut out = String::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            // Settings are `key = value` lines that are not comments.
+            if trimmed.contains('=') && !trimmed.starts_with('#') {
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Replace the site names and categories with a merge of several lists (see
+    /// [`AppMap::from_layers`]). The browser and block settings are kept as they are.
+    pub fn with_site_layers(mut self, layers: &[(&str, i64)]) -> Self {
+        self.sites = AppMap::from_layers(layers);
+        self
+    }
+
     /// Is this (already reduced) site on the block list?
     pub fn is_blocked(&self, site: &str) -> bool {
         self.blocked.iter().any(|b| b == site)
@@ -315,5 +339,23 @@ mod tests {
                 .rev()
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn site_lines_drop_the_settings_but_keep_sites_and_comments() {
+        let text = "browser = zen\nblock = bank.example\n# my sites\ngithub.com github Research\n";
+        assert_eq!(
+            DomainConfig::site_lines(text),
+            "# my sites\ngithub.com github Research\n"
+        );
+    }
+
+    #[test]
+    fn shared_site_lists_merge_without_touching_the_settings() {
+        let config = DomainConfig::from_conf("browser = zen\nblock = bank.example\n")
+            .with_site_layers(&[("", 0), ("github.com github Research\n", 9)]);
+        assert_eq!(config.sites.lookup("github.com").category, "Research");
+        assert_eq!(config.blocked, vec!["bank.example"]);
+        assert_eq!(config.browsers, vec!["zen"]);
     }
 }

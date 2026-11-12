@@ -108,6 +108,80 @@ pub fn parse_doc_id(id: &str) -> Option<(String, i64)> {
     Some((device.to_string(), parse_day_string(date)?))
 }
 
+/// A computer's own lists of friendly names, shared through CouchDB: its `apps.conf`
+/// and the site lines of its `domains.conf`.
+///
+/// Like day documents, each computer writes only its own (`conf:<device>`), so there are
+/// no conflicts. Every computer merges all of them (see `AppMap::from_layers`): for the
+/// same app, the list changed most recently wins.
+///
+/// ```json
+/// { "_id": "conf:mangrove", "type": "conf", "device": "mangrove", "schema": 1,
+///   "apps": "<apps.conf text>", "apps_updated": 1760000000,
+///   "domains": "<site lines>", "domains_updated": 1760000000 }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfLists {
+    /// The text of `apps.conf` (names and categories for applications).
+    pub apps: String,
+    /// When that list last changed, in Unix seconds (0 when it never did).
+    pub apps_updated: i64,
+    /// The site lines of `domains.conf` (names and categories for websites).
+    pub domains: String,
+    /// When that list last changed, in Unix seconds.
+    pub domains_updated: i64,
+}
+
+/// The id of a computer's lists document: `conf:<device>`.
+pub fn conf_doc_id(device: &str) -> String {
+    format!("conf:{device}")
+}
+
+/// The device named by a lists document id; `None` for other ids.
+pub fn parse_conf_doc_id(id: &str) -> Option<String> {
+    let device = id.strip_prefix("conf:")?;
+    (!device.is_empty()).then(|| device.to_string())
+}
+
+/// Build the lists document for a computer. `rev` is the revision CouchDB last gave us.
+pub fn build_conf_doc(device: &str, lists: &ConfLists, rev: Option<&str>) -> Value {
+    let mut doc = json!({
+        "_id": conf_doc_id(device),
+        "type": "conf",
+        "device": device,
+        "schema": DOC_SCHEMA,
+        "apps": lists.apps,
+        "apps_updated": lists.apps_updated,
+        "domains": lists.domains,
+        "domains_updated": lists.domains_updated,
+    });
+    if let Some(rev) = rev {
+        doc["_rev"] = json!(rev);
+    }
+    doc
+}
+
+/// Read a lists document back into (device, lists). Missing text or times count as empty
+/// or 0, so a document from a newer version still works; a wrong id or device is an error.
+pub fn parse_conf_doc(doc: &Value) -> Result<(String, ConfLists)> {
+    let id = doc["_id"].as_str().context("document has no _id")?;
+    let device = parse_conf_doc_id(id).ok_or_else(|| anyhow!("'{id}' is not a lists document"))?;
+    if doc["device"].as_str() != Some(device.as_str()) {
+        return Err(anyhow!("'{id}' names a different device inside"));
+    }
+    let text = |key: &str| doc[key].as_str().unwrap_or("").to_string();
+    let time = |key: &str| doc[key].as_i64().unwrap_or(0);
+    Ok((
+        device,
+        ConfLists {
+            apps: text("apps"),
+            apps_updated: time("apps_updated"),
+            domains: text("domains"),
+            domains_updated: time("domains_updated"),
+        },
+    ))
+}
+
 /// Build the document for one computer's day. `rev` is the revision CouchDB last gave us
 /// for this document (needed to update it), if there is one.
 pub fn build_doc(device: &str, day: i64, rows: &DayRows, rev: Option<&str>) -> Value {
@@ -264,5 +338,27 @@ mod tests {
         let mut sparse = good;
         sparse.as_object_mut().unwrap().remove("domains");
         assert!(parse_doc(&sparse).unwrap().2.domains.is_empty());
+    }
+
+    #[test]
+    fn a_lists_document_survives_a_round_trip_and_checks_its_id() {
+        let lists = ConfLists {
+            apps: "zen zen Browser\n".into(),
+            apps_updated: 5,
+            domains: "github.com github Research\n".into(),
+            domains_updated: 6,
+        };
+        let doc = build_conf_doc("mangrove", &lists, Some("2-abc"));
+        assert_eq!(doc["_id"], "conf:mangrove");
+        assert_eq!(doc["_rev"], "2-abc");
+        assert_eq!(
+            parse_conf_doc(&doc).unwrap(),
+            ("mangrove".to_string(), lists)
+        );
+        // A document whose device disagrees with its id is refused.
+        let mut bad = doc.clone();
+        bad["device"] = json!("other");
+        assert!(parse_conf_doc(&bad).is_err());
+        assert_eq!(parse_conf_doc_id("day:mangrove:2026-01-01"), None);
     }
 }

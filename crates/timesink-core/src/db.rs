@@ -610,6 +610,78 @@ impl Db {
 }
 
 impl Db {
+    /// Remember another computer's shared lists (names and categories), replacing what
+    /// was kept for it. `None` forgets them. Kept in `sync_state` as JSON, so no new table
+    /// (and no database migration) is needed.
+    pub fn set_remote_conf(
+        &self,
+        device: &str,
+        lists: Option<&crate::syncdoc::ConfLists>,
+    ) -> Result<()> {
+        let key = format!("conf:{device}");
+        match lists {
+            Some(l) => self.set_sync_state(&key, &conf_to_json(l)),
+            None => {
+                self.conn
+                    .execute("DELETE FROM sync_state WHERE key = ?1", [&key])?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The shared lists of every other computer that has uploaded some, as
+    /// (device, lists), in device-name order.
+    pub fn remote_confs(&self) -> Result<Vec<(String, crate::syncdoc::ConfLists)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM sync_state WHERE key LIKE 'conf:%' ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            let device = key.trim_start_matches("conf:").to_string();
+            // A value that cannot be read is skipped, never fatal.
+            if let Some(lists) = conf_from_json(&value) {
+                out.push((device, lists));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The lists this computer last uploaded successfully, to tell whether they changed.
+    pub fn own_conf_uploaded(&self) -> Result<Option<crate::syncdoc::ConfLists>> {
+        Ok(self
+            .sync_state("conf_own")?
+            .and_then(|v| conf_from_json(&v)))
+    }
+
+    /// Remember the lists that were just uploaded.
+    pub fn set_own_conf_uploaded(&self, lists: &crate::syncdoc::ConfLists) -> Result<()> {
+        self.set_sync_state("conf_own", &conf_to_json(lists))
+    }
+}
+
+/// Lists as the JSON text kept in `sync_state`.
+fn conf_to_json(l: &crate::syncdoc::ConfLists) -> String {
+    serde_json::json!({
+        "apps": l.apps, "apps_updated": l.apps_updated,
+        "domains": l.domains, "domains_updated": l.domains_updated,
+    })
+    .to_string()
+}
+
+/// The reverse of [`conf_to_json`]; `None` if the text is not what it should be.
+fn conf_from_json(text: &str) -> Option<crate::syncdoc::ConfLists> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some(crate::syncdoc::ConfLists {
+        apps: v["apps"].as_str()?.to_string(),
+        apps_updated: v["apps_updated"].as_i64().unwrap_or(0),
+        domains: v["domains"].as_str()?.to_string(),
+        domains_updated: v["domains_updated"].as_i64().unwrap_or(0),
+    })
+}
+
+impl Db {
     /// Record what the browser extension just reported: `Some(site)` = this site is the
     /// active tab of the focused window, `None` = nothing trackable is in front (another
     /// window, a private window, a blocked or internal page).
@@ -1648,5 +1720,26 @@ mod listening_tests {
         assert_eq!(db.take_dirty_days().unwrap(), vec![1, 3, 5]);
         assert_eq!(db.intervals_between(0, 10_000_000, None).unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn other_computers_lists_are_kept_and_forgotten() {
+        let db = Db::open_in_memory("pixel").unwrap();
+        let lists = crate::syncdoc::ConfLists {
+            apps: "zen zen Browser\n".into(),
+            apps_updated: 3,
+            domains: String::new(),
+            domains_updated: 0,
+        };
+        assert!(db.remote_confs().unwrap().is_empty());
+        db.set_remote_conf("mangrove", Some(&lists)).unwrap();
+        assert_eq!(
+            db.remote_confs().unwrap(),
+            vec![("mangrove".to_string(), lists.clone())]
+        );
+        db.set_remote_conf("mangrove", None).unwrap();
+        assert!(db.remote_confs().unwrap().is_empty());
+        db.set_own_conf_uploaded(&lists).unwrap();
+        assert_eq!(db.own_conf_uploaded().unwrap(), Some(lists));
     }
 }

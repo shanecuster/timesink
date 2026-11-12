@@ -385,8 +385,12 @@ downloads everyone else's, so nothing can conflict.
 
 What is shared: one CouchDB document per computer per UTC day, holding app focus
 intervals, listening and website time. **Window titles are never uploaded**; rows
-downloaded from other computers have empty titles. `apps.conf` and `domains.conf`
-stay on each computer. Forgetting data on one computer removes its documents from the
+downloaded from other computers have empty titles. Each computer also shares its
+friendly names and categories (the text of `apps.conf` and the site lines of
+`domains.conf`, never the `browser =` and `block =` settings) as one small document
+`conf:<computer>`. Your own files are never rewritten; every computer merges all
+the lists, and for the same app the list changed most recently wins. Your category
+colours keep your own order. Forgetting data on one computer removes its documents from the
 server, so it disappears from the others too. The database is backed up before the
 first run with the new format (`timesink.db.bak-v4`); take a restic backup before the
 first real sync.

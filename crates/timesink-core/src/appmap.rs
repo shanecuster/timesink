@@ -151,6 +151,43 @@ impl AppMap {
         map
     }
 
+    /// Merge several lists into one. Each layer is (the text of an `apps.conf`, when that
+    /// list last changed).
+    ///
+    /// For the same app the layer changed MOST RECENTLY wins; when two changed at the same
+    /// time the one earlier in `layers` wins. Category colours follow the order of
+    /// `layers` instead: the first layer's categories come first, then new ones from the
+    /// next, so putting your own list first keeps your own colours steady.
+    pub fn from_layers(layers: &[(&str, i64)]) -> Self {
+        let parsed: Vec<AppMap> = layers
+            .iter()
+            .map(|(text, _)| AppMap::from_conf(text))
+            .collect();
+        let mut merged = AppMap::default();
+        // Categories in layer order (first appearance wins).
+        for layer in &parsed {
+            for category in &layer.category_order {
+                if !merged.category_order.contains(category) {
+                    merged.category_order.push(category.clone());
+                }
+            }
+        }
+        // Apply the oldest list first so newer ones overwrite it; on equal times the
+        // earlier layer goes last, so it wins.
+        let mut order: Vec<usize> = (0..parsed.len()).collect();
+        order.sort_by_key(|&i| (layers[i].1, std::cmp::Reverse(i)));
+        for i in order {
+            for (raw, entry) in &parsed[i].exact {
+                merged.exact.insert(raw.clone(), entry.clone());
+            }
+            for (prefix, entry) in &parsed[i].prefixes {
+                merged.prefixes.retain(|(p, _)| p != prefix);
+                merged.prefixes.push((prefix.clone(), entry.clone()));
+            }
+        }
+        merged
+    }
+
     /// Look up how an application should be shown.
     pub fn lookup(&self, raw_class: &str) -> AppInfo {
         let key = raw_class.to_lowercase();
@@ -537,5 +574,36 @@ mod tests {
         ];
         let (apps, _) = map.group(&totals);
         assert_eq!(apps[0].raws.len(), 2);
+    }
+
+    #[test]
+    fn the_most_recently_changed_list_wins_for_the_same_app() {
+        // Mine was edited at 100, the other computer's at 200: theirs wins for `zen`,
+        // mine still answers for what only I list.
+        let mine = "zen zen Browser\nwezterm wezterm Terminal\n";
+        let theirs = "zen zen Web\ncom.x.app xapp Games\n";
+        let map = AppMap::from_layers(&[(mine, 100), (theirs, 200)]);
+        assert_eq!(map.lookup("zen").category, "Web");
+        assert_eq!(map.lookup("wezterm").category, "Terminal");
+        assert_eq!(map.lookup("com.x.app").display, "xapp");
+        // Older theirs: mine wins.
+        let map = AppMap::from_layers(&[(mine, 300), (theirs, 200)]);
+        assert_eq!(map.lookup("zen").category, "Browser");
+        // The same time: the earlier layer (mine) wins.
+        let map = AppMap::from_layers(&[(mine, 200), (theirs, 200)]);
+        assert_eq!(map.lookup("zen").category, "Browser");
+    }
+
+    #[test]
+    fn merged_categories_keep_the_first_layers_order() {
+        let map =
+            AppMap::from_layers(&[("a a Alpha\nb b Beta\n", 1), ("c c Gamma\nd d Alpha\n", 2)]);
+        assert_eq!(map.categories(), vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn a_prefix_entry_from_another_list_applies() {
+        let map = AppMap::from_layers(&[("", 0), ("io.example.* ex Tools\n", 5)]);
+        assert_eq!(map.lookup("io.example.App").category, "Tools");
     }
 }

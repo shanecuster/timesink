@@ -129,7 +129,7 @@ pub fn collect(
     if sites.is_empty() {
         return Ok(report);
     }
-    let config = paths::load_domain_config().unwrap_or_default();
+    let config = paths::load_domain_config_with(db).unwrap_or_default();
     let spans = data::site_spans(&sites, &intervals, &config);
     Ok(report.with_sites(&spans, &config, range, now, tz))
 }
@@ -304,7 +304,9 @@ pub fn run_sync(db: &Db, status_only: bool) -> Result<String> {
         return Ok(out);
     }
     let mut remote = HttpRemote::new(config);
-    let outcome = sync::run(db, &mut remote);
+    // Share this computer's names and categories too (a problem there is only a warning).
+    let own = paths::own_conf_lists().ok();
+    let outcome = sync::run_with_lists(db, &mut remote, own.as_ref());
     // Remember how it went, so the interface can show "synced 2m ago" or "sync failed".
     // Whoever ran the sync (the timer, the `S` key or the command line) leaves the same
     // trace. A failure to save the note is not worth failing over.
@@ -323,6 +325,17 @@ pub fn run_sync(db: &Db, status_only: bool) -> Result<String> {
         "Uploaded {} day(s), removed {} from the server, downloaded {} day(s) from other devices.",
         report.uploaded, report.removed, report.downloaded
     ));
+    if report.lists_uploaded || report.lists_downloaded > 0 {
+        out.push_str(&format!(
+            "\nNames and categories: {}{} list(s) from other devices.",
+            if report.lists_uploaded {
+                "uploaded yours, got "
+            } else {
+                "got "
+            },
+            report.lists_downloaded
+        ));
+    }
     for warning in &report.warnings {
         out.push_str(&format!("\nwarning: {warning}"));
     }
